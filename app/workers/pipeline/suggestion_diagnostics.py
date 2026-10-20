@@ -35,7 +35,16 @@ _MISMATCHES = frozenset({"add_anchor_not_in_document", "old_text_not_in_document
 
 
 def safe_id(value: uuid.UUID | None) -> str:
-    return str(value) if type(value) is uuid.UUID else "unavailable"
+    """Accept driver UUID subclasses without trusting their string conversion."""
+    try:
+        if isinstance(value, uuid.UUID):
+            integer = value.int
+            if type(integer) is int and 0 <= integer < (1 << 128):
+                return str(uuid.UUID(int=integer))
+    except Exception:
+        # An unusual subclass must not break mapping or expose exception text.
+        pass
+    return "unavailable"
 
 
 def safe_change_type(value: str) -> str:

@@ -11,7 +11,11 @@ historical incident; no historical prompt/response/source was available.
 At most 20 per-item warning records per mapper call, with the same metadata in
 `message` (including the Celery console) and `extra` (JSON):
 
-- `analysis_job_id`, `document_id`, `source_id` (UUID or fixed `unavailable`).
+- `analysis_job_id`, `document_id`, `source_id` (canonical UUID or fixed
+  `unavailable`). Driver UUID subclasses, including asyncpg's, are supported.
+  IDs are reconstructed from a validated 128-bit integer, never by invoking a
+  subclass's `__str__`; strings, invalid integers and failing accessors are
+  rejected without serializing their values or exceptions.
 - `item_index_0based`: index in the original `batch.items`, starting at **zero**.
 - `original_change_type`, `final_change_type`: `add`, `modify`, `delete`, `unknown`.
 - `reason`: the existing fixed skip reason.
@@ -116,3 +120,40 @@ Observed local results on final code:
   case-mismatch quotes and normalization variants. All matched.
 - AST comparisons confirmed unchanged `_normalize`, `_resolve_anchor`,
   `_skip_reason`, `_with_inferred_note` and `infer_anchor`.
+
+## Response retention is not a diagnostic feature
+
+In this code path `OpenAICompatibleClient` returns the response content in the
+in-memory `LLMSuggestionBatch.raw_response`. The worker maps `batch.items` and
+persists only the retained suggestions; no application consumer persists
+`raw_response`. The Celery task returns only source/status/count metadata on
+success. Its Redis result backend therefore does not hold the LLM batch. The
+`parsed_doc:<job_id>` Redis cache holds parsed document text, not the model
+response. Neither store can recover discarded items from this implementation.
+
+This is a source-code finding, not an inspection of a particular deployment,
+provider's request history, proxy or external tracing system. No production
+Redis/database/provider access was performed and no response from a past run was
+recovered. Full-text retention/logging, new storage and automatic analysis reruns
+are intentionally not introduced.
+
+## UUID follow-up verification
+
+Executed in an isolated Python 3.12.8 environment with project dev dependencies
+(asyncpg 0.32.0), using `.env.example` test defaults and no external services:
+
+- Before the fix, canonical UUID regression: **3 failed, 1 passed**, including
+  the real asyncpg UUID class. An initial fixture collection error was corrected
+  before that red run; it is not counted as a successful regression run.
+- Targeted UUID + mapper + logging suites: **152 passed**. Driver IDs appear in
+  per-item/aggregate messages, JSON extra and Celery formatting. Custom UUID
+  string conversions are bypassed; invalid/failing integer accessors are safe.
+  Returned Suggestion fields/statuses match with diagnostics enabled/disabled.
+- CI unit command: **561 passed, 3 skipped, 32 deselected**, coverage **89.31%**.
+- `ruff check .`, `ruff format --check .`, both layer checks, app import,
+  `alembic heads` (single head 0032) and `git diff --check`: passed.
+- `mypy app/ --ignore-missing-imports`: **failed**, the same three pre-existing
+  errors in `suggestion_service.py:88,128,258`, reproduced on the unchanged PR
+  head `2681c50c1158d0528a5af096a6565259623ef269` in a detached worktree.
+- No Docker build, live database migration, infrastructure integration tests,
+  paid LLM request or analysis rerun was performed.

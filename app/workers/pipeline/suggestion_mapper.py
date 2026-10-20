@@ -27,6 +27,12 @@ from dataclasses import replace
 from app.domain.interfaces.llm_client import LLMSuggestionBatch, LLMSuggestionItem
 from app.infrastructure.db.models.enums import ChangeType, SuggestionStatus
 from app.infrastructure.db.models.suggestion import Suggestion
+from app.workers.pipeline.suggestion_diagnostics import (
+    MAX_RECORDS,
+    DiagnosticBudget,
+    log_skip,
+    safe_id,
+)
 
 logger = logging.getLogger("syncscribe.workers.suggestion_mapper")
 
@@ -134,6 +140,8 @@ def _log_skipped(
     kept: int,
     analysis_job_id: uuid.UUID,
     document_id: uuid.UUID,
+    source_id: uuid.UUID | None,
+    diagnostic_records: int,
 ) -> None:
     """Агрегированная диагностика отброшенных правок без текста документа и ответа модели.
 
@@ -145,25 +153,40 @@ def _log_skipped(
     for reason, _ in skipped_items:
         skipped[reason] = skipped.get(reason, 0) + 1
     context = {
-        "analysis_job_id": str(analysis_job_id),
-        "document_id": str(document_id),
+        "analysis_job_id": safe_id(analysis_job_id),
+        "document_id": safe_id(document_id),
+        "source_id": safe_id(source_id),
+        "received": len(batch.items),
+        "dropped": len(skipped_items),
+        "diagnostic_records": diagnostic_records,
+        "diagnostic_records_omitted": len(skipped_items) - diagnostic_records,
         "skipped": skipped,
         "kept": kept,
     }
     details = ", ".join(f"{reason}={count}" for reason, count in sorted(skipped.items()))
     logger.warning(
-        "Часть правок LLM отброшена как невалидные: %s (сохранено %d из %d)",
+        "Часть правок LLM отброшена как невалидные: %s (сохранено %d из %d) "
+        "received=%d kept=%d dropped=%d diagnostic_records=%d diagnostic_records_omitted=%d "
+        "(analysis_job_id=%s document_id=%s source_id=%s)",
         details,
         kept,
         len(batch.items),
+        len(batch.items),
+        kept,
+        len(skipped_items),
+        diagnostic_records,
+        len(skipped_items) - diagnostic_records,
+        context["analysis_job_id"],
+        context["document_id"],
+        context["source_id"],
         extra=context,
     )
     if kept == 0:
         logger.warning(
             "Все %d правок LLM отброшены (job=%s, document=%s)",
             len(batch.items),
-            analysis_job_id,
-            document_id,
+            context["analysis_job_id"],
+            context["document_id"],
             extra=context,
         )
 
@@ -175,15 +198,19 @@ def map_to_suggestions(
     *,
     document_text: str,
     document_format: str = "",
+    source_id: uuid.UUID | None = None,
+    diagnostics_enabled: bool = True,
 ) -> list[Suggestion]:
     """Невалидные элементы пропускаются с предупреждением в логе: лучше потерять одну правку,
     чем уронить обработку источника целиком."""
     single_paragraph = document_format.lower() in _SINGLE_PARAGRAPH_FORMATS
     suggestions: list[Suggestion] = []
     skipped_items: list[tuple[str, LLMSuggestionItem]] = []
+    diagnostic_records = 0
+    budget = DiagnosticBudget()
     inferred_count = 0
     appended_count = 0
-    for raw_item in batch.items:
+    for index, raw_item in enumerate(batch.items):
         normalized = _normalize(raw_item)
         if raw_item.change_type == "modify" and normalized.change_type == "add":
             appended_count += 1
@@ -191,6 +218,22 @@ def map_to_suggestions(
         reason = _skip_reason(item, document_text, single_paragraph=single_paragraph)
         if reason is not None:
             skipped_items.append((reason, item))
+            if diagnostics_enabled and diagnostic_records < MAX_RECORDS:
+                log_skip(
+                    logger,
+                    index=index,
+                    reason=reason,
+                    raw=raw_item,
+                    normalized=normalized,
+                    resolved=item,
+                    inferred=inferred,
+                    document_text=document_text,
+                    analysis_job_id=analysis_job_id,
+                    document_id=document_id,
+                    source_id=source_id,
+                    budget=budget,
+                )
+                diagnostic_records += 1
             continue
         rationale = item.rationale
         if inferred:
@@ -209,7 +252,7 @@ def map_to_suggestions(
                 confidence_score=item.confidence_score,
             )
         )
-    log_context = {"analysis_job_id": str(analysis_job_id), "document_id": str(document_id)}
+    log_context = {"analysis_job_id": safe_id(analysis_job_id), "document_id": safe_id(document_id)}
     if appended_count:
         logger.info(
             "Для %d правок modify с дописанным текстом тип изменён на add",
@@ -229,5 +272,7 @@ def map_to_suggestions(
             kept=len(suggestions),
             analysis_job_id=analysis_job_id,
             document_id=document_id,
+            source_id=source_id,
+            diagnostic_records=diagnostic_records,
         )
     return suggestions

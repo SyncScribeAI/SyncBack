@@ -288,6 +288,7 @@ async def _process_source(job_id: str, source_id: str) -> dict[str, Any]:
         document_id,
         document_text=plain_text,
         document_format=document_format,
+        source_id=source_uuid,
     )
 
     async with uow_factory() as uow:

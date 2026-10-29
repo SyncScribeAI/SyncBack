@@ -54,6 +54,27 @@ def test_prompt_describes_insert_after_and_single_paragraph_rule() -> None:
     assert "Пример ответа:" in prompt
 
 
+def test_prompt_demands_verbatim_quotes_without_changes() -> None:
+    prompt = build_prompt("doc", "src", "txt", max_input_chars=1000)
+    assert "копируй из блока <document> символ в символ" in prompt
+    assert "не меняй слова и их формы, регистр букв, пунктуацию" in prompt
+    assert "не перефразируй" in prompt
+    assert "будет отклонена" in prompt
+
+
+def test_prompt_does_not_promise_tolerant_matching() -> None:
+    prompt = build_prompt("doc", "src", "txt", max_input_chars=1000).lower()
+    for phrase in ("без учёта регистра", "приблизительно", "примерно", "своими словами"):
+        assert phrase not in prompt
+
+
+def test_verbatim_rule_comes_before_example_and_leaves_data_untouched() -> None:
+    document = "Срок ответа — 10 дней."
+    prompt = build_prompt(document, "src", "txt", max_input_chars=1000)
+    assert prompt.index("символ в символ") < prompt.index("Пример ответа:")
+    assert f"<document>\n{document}\n</document>" in prompt
+
+
 def test_prompt_forbids_copying_source_and_splitting_modify() -> None:
     prompt = build_prompt("doc", "src", "txt", max_input_chars=1000)
     assert "Не копируй источник целиком" in prompt

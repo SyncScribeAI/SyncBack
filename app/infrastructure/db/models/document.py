@@ -113,11 +113,15 @@ class Document(Base):
         foreign_keys="AnalysisJob.document_id",
         cascade="all, delete-orphan",
     )
-    # Без cascade; foreign_keys указан явно, чтобы разрешить ambiguity (два FK на analysis_jobs).
+    # Разрывает цикл Document -> current job -> Document при ORM DELETE:
+    # SQLAlchemy сначала обнуляет current_analysis_job_id, затем удаляет историю
+    # и документ. FK ON DELETE SET NULL сам по себе не упорядочивает ORM flush.
+    # Без cascade: удаление этой ссылки не должно удалять задачу анализа.
     current_analysis_job: Mapped["AnalysisJob | None"] = relationship(
         "AnalysisJob",
         foreign_keys=[current_analysis_job_id],
         primaryjoin="Document.current_analysis_job_id == AnalysisJob.id",
+        post_update=True,
         lazy="select",
         uselist=False,
     )

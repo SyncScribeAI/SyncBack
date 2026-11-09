@@ -40,5 +40,13 @@ class SourceMetadata:
 
 class SourceConnector(Protocol):
     async def fetch(self, source: SourceRef) -> str: ...
+
+    async def fetch_structured(self, source: SourceRef) -> str:
+        """Текст источника в едином формате для ML (см. app.domain.source_text).
+
+        fetch остаётся для текущего LLM-конвейера: его промпт рассчитан на прежний текст.
+        """
+        ...
+
     async def get_metadata(self, source: SourceRef) -> SourceMetadata: ...
     def supports(self, source_type: SourceKind) -> bool: ...

@@ -19,14 +19,21 @@ class ManualUploadConnector:
         return source_type == SourceKind.FILE
 
     async def fetch(self, source: SourceRef) -> str:
+        storage_key, raw_bytes = await self._download(source)
+        return self._parsers.extract_text(storage_key, raw_bytes)
+
+    async def fetch_structured(self, source: SourceRef) -> str:
+        storage_key, raw_bytes = await self._download(source)
+        return self._parsers.extract_source_text(storage_key, raw_bytes)
+
+    async def _download(self, source: SourceRef) -> tuple[str, bytes]:
         if source.type != SourceKind.FILE:
             raise ValueError(
                 f"ManualUploadConnector поддерживает только FILE, получен: {source.type}"
             )
         if not source.storage_key:
             raise ValueError(f"storage_key отсутствует для источника {source.id}")
-        raw_bytes = await self._storage.download(source.storage_key)
-        return self._parsers.extract_text(source.storage_key, raw_bytes)
+        return source.storage_key, await self._storage.download(source.storage_key)
 
     async def get_metadata(self, source: SourceRef) -> SourceMetadata:
         return SourceMetadata(

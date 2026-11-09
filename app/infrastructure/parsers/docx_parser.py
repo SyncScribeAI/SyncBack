@@ -1,4 +1,6 @@
 import io
+from collections.abc import Iterator
+from typing import Any
 
 from docx import Document as DocxDocument
 from docx.text.paragraph import Paragraph
@@ -9,8 +11,9 @@ from app.domain.interfaces.document_parser import (
     DocumentSection,
     ParsedDocument,
 )
+from app.domain.source_text import SourceFragment, serialize_source
 from app.domain.text_normalization import normalize_text
-from app.infrastructure.docx_paragraphs import iter_docx_paragraphs
+from app.infrastructure.docx_paragraphs import iter_docx_body, iter_docx_paragraphs
 
 _HEADING_STYLE_PREFIX = "Heading"
 _LIST_STYLE_PREFIX = "List"
@@ -27,7 +30,7 @@ class DocxParser:
         for item in iter_docx_paragraphs(docx_document):
             paragraph = item.paragraph
             paragraph_text = normalize_text(paragraph.text)
-            style_name = paragraph.style.name if paragraph.style is not None else ""
+            style_name = _style_name(paragraph)
             # Стиль заголовка внутри ячейки — оформление таблицы, а не раздел документа.
             is_heading = not item.in_table and style_name.startswith(_HEADING_STYLE_PREFIX)
             if is_heading:
@@ -41,16 +44,10 @@ class DocxParser:
             content = paragraph_text.strip()
             if content:
                 start = offset + (len(paragraph_text) - len(paragraph_text.lstrip()))
-                level: int | None = None
                 if item.in_table:
-                    block_type = DocumentBlockType.TABLE
-                elif is_heading:
-                    block_type = DocumentBlockType.HEADING
-                    level = _heading_level(style_name)
-                elif _is_list_item(paragraph, style_name):
-                    block_type = DocumentBlockType.LIST_ITEM
+                    block_type, level = DocumentBlockType.TABLE, None
                 else:
-                    block_type = DocumentBlockType.PARAGRAPH
+                    block_type, level = _classify(paragraph, style_name)
                 block_spans.append((block_type, start, start + len(content), level))
             text_parts.append(paragraph_text)
             offset += len(paragraph_text) + 1
@@ -64,11 +61,43 @@ class DocxParser:
             builder.add(block_type, start, end, heading_level=level)
         return ParsedDocument(plain_text=plain_text, sections=sections, blocks=builder.build())
 
+    def extract_source_text(self, raw_bytes: bytes) -> str:
+        return serialize_source(_iter_source_fragments(DocxDocument(io.BytesIO(raw_bytes))))
+
     def extract_text(self, raw_bytes: bytes) -> str:
         docx_document = DocxDocument(io.BytesIO(raw_bytes))
         return "\n".join(
             normalize_text(item.paragraph.text) for item in iter_docx_paragraphs(docx_document)
         )
+
+
+def _iter_source_fragments(docx_document: Any) -> Iterator[SourceFragment]:
+    for item in iter_docx_body(docx_document):
+        if isinstance(item, Paragraph):
+            text = normalize_text(item.text)
+            if text.strip():
+                block_type, level = _classify(item, _style_name(item))
+                yield SourceFragment(block_type, text, level)
+            continue
+        rows = [
+            f"| {' | '.join(normalize_text(cell) for cell in cells)} |"
+            for cells in item
+            if any(cells)
+        ]
+        if rows:
+            yield SourceFragment(DocumentBlockType.TABLE, "\n".join(rows))
+
+
+def _style_name(paragraph: Paragraph) -> str:
+    return paragraph.style.name if paragraph.style is not None else ""
+
+
+def _classify(paragraph: Paragraph, style_name: str) -> tuple[DocumentBlockType, int | None]:
+    if style_name.startswith(_HEADING_STYLE_PREFIX):
+        return DocumentBlockType.HEADING, _heading_level(style_name)
+    if _is_list_item(paragraph, style_name):
+        return DocumentBlockType.LIST_ITEM, None
+    return DocumentBlockType.PARAGRAPH, None
 
 
 def _heading_level(style_name: str) -> int:

@@ -38,3 +38,31 @@ def _iter_table(table: Table) -> Iterator[DocxParagraph]:
                     yield DocxParagraph(item, in_table=True)
                 else:
                     yield from _iter_table(item)
+
+
+def iter_docx_body(document: Any) -> Iterator[Paragraph | list[list[str]]]:
+    """Тело документа для источника: абзацы как есть, таблица — строками ячеек.
+
+    Для источника важна связь «ячейка ↔ строка» («Цена | 100 руб.»), поэтому таблица
+    отдаётся целиком, а не абзацами ячеек, как в iter_docx_paragraphs. O(P).
+    """
+    for item in document.iter_inner_content():
+        if isinstance(item, Paragraph):
+            yield item
+        else:
+            yield [_row_cells(row._tr.tc_lst, item) for row in item.rows]
+
+
+def _row_cells(tcs: list[Any], table: Table) -> list[str]:
+    cells: list[str] = []
+    for tc in tcs:
+        # Абзацы ячейки и вложенных таблиц сливаются в одну строку: строка таблицы
+        # в источнике должна оставаться одной строкой разметки.
+        parts: list[str] = []
+        for item in _Cell(tc, table).iter_inner_content():
+            if isinstance(item, Paragraph):
+                parts.append(item.text)
+            else:
+                parts.extend(p.paragraph.text for p in _iter_table(item))
+        cells.append(" ".join(" ".join(parts).split()))
+    return cells

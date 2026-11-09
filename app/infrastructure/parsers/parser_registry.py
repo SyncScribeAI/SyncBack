@@ -51,6 +51,9 @@ class DocumentParserRegistry:
     def extract_text(self, filename: str, raw_bytes: bytes) -> str:
         return self._parser_for(filename).extract_text(raw_bytes)
 
+    def extract_source_text(self, filename: str, raw_bytes: bytes) -> str:
+        return self._parser_for(filename).extract_source_text(raw_bytes)
+
     def _parser_for(self, filename: str) -> DocumentParser:
         suffix = Path(filename).suffix.lower()
 

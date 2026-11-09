@@ -24,6 +24,10 @@ class MarkdownParser:
         blocks = _split_blocks(text)
         return ParsedDocument(plain_text=text, sections=_sections_from(blocks, text), blocks=blocks)
 
+    def extract_source_text(self, raw_bytes: bytes) -> str:
+        """Markdown уже в формате источника: разметка сохраняется как есть."""
+        return self.extract_text(raw_bytes)
+
     def extract_text(self, raw_bytes: bytes) -> str:
         return normalize_text(raw_bytes.decode("utf-8", errors="replace"))
 

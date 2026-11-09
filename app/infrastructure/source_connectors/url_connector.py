@@ -28,7 +28,10 @@ import httpx
 
 from app.domain.exceptions import InvalidSourceUrlError, SourceFetchError
 from app.domain.interfaces.source_connector import SourceKind, SourceMetadata, SourceRef
+from app.domain.source_text import paragraphize, serialize_source
 from app.domain.source_url import IpAddress, SourceUrl, is_public_address
+from app.domain.text_normalization import normalize_text
+from app.infrastructure.source_connectors.html_structure import iter_html_fragments
 
 logger = logging.getLogger("syncscribe.connectors.url")
 
@@ -38,6 +41,7 @@ _USER_AGENT: Final = "SyncScribeBot/1.0 (+https://syncscribe.app/bot)"
 _TIMEOUT: Final = httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=5.0)
 _ROBOTS_TIMEOUT: Final = 3.0
 _ROBOTS_MAX_BYTES: Final = 512 * 1024
+_MARKDOWN_SUFFIXES: Final = (".md", ".markdown")
 
 Resolver = Callable[[str, int], Awaitable[list[IpAddress]]]
 
@@ -84,6 +88,14 @@ class UrlConnector:
         return source_type == SourceKind.URL
 
     async def fetch(self, source: SourceRef) -> str:
+        raw, content_type = await self._fetch_raw(source)
+        return self._to_text(raw, content_type)
+
+    async def fetch_structured(self, source: SourceRef) -> str:
+        raw, content_type = await self._fetch_raw(source)
+        return self._to_source_text(raw, content_type, source.url or "")
+
+    async def _fetch_raw(self, source: SourceRef) -> tuple[bytes, str]:
         if not source.url:
             raise ValueError(f"url отсутствует для источника {source.id}")
 
@@ -104,7 +116,7 @@ class UrlConnector:
             uploaded_at=source.uploaded_at.isoformat(),
         )
 
-    async def _download(self, client: httpx.AsyncClient, url: SourceUrl) -> str:
+    async def _download(self, client: httpx.AsyncClient, url: SourceUrl) -> tuple[bytes, str]:
         for _ in range(self._max_redirects + 1):
             address = await self._pick_address(url)
             request = self._pinned_request(url, address)
@@ -116,7 +128,7 @@ class UrlConnector:
                     continue
                 response.raise_for_status()
                 raw = await self._read_limited(response, url.value)
-                return self._to_text(raw, response.headers.get("content-type", ""))
+                return raw, response.headers.get("content-type", "")
         raise SourceFetchError(f"Слишком много редиректов (больше {self._max_redirects})")
 
     async def _pick_address(self, url: SourceUrl) -> IpAddress:
@@ -190,6 +202,17 @@ class UrlConnector:
                 "robots.txt запрещает скачивание (пока только предупреждаем)",
                 extra={"url": url.value},
             )
+
+    @staticmethod
+    def _to_source_text(raw: bytes, content_type: str, url: str) -> str:
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        if "html" in media_type:
+            return serialize_source(iter_html_fragments(raw))
+        text = normalize_text(raw.decode("utf-8", errors="replace"))
+        # Markdown по ссылке (raw-файлы репозиториев) уже в формате источника.
+        if media_type == "text/markdown" or urlsplit(url).path.lower().endswith(_MARKDOWN_SUFFIXES):
+            return text
+        return paragraphize(text)
 
     @staticmethod
     def _to_text(raw: bytes, content_type: str) -> str:

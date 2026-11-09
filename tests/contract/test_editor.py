@@ -69,6 +69,25 @@ async def test_editor_for_draft_document(client: AsyncClient) -> None:
     assert body["document"]["status"] == "draft"
     assert body["document"]["view_mode"] == "original"
     assert "Alpha" in body["content"]["plain_text"]
+    # Текста в блоке нет: фронт берёт его из plain_text по смещениям.
+    assert body["content"]["blocks"] == [
+        {
+            "ref": "p-0",
+            "type": "paragraph",
+            "start_offset": 0,
+            "end_offset": 5,
+            "editable": True,
+            "heading_level": None,
+        },
+        {
+            "ref": "p-1",
+            "type": "paragraph",
+            "start_offset": 6,
+            "end_offset": 10,
+            "editable": True,
+            "heading_level": None,
+        },
+    ]
     # Для черновика оригинал совпадает с содержимым: отдельного файла нет.
     assert body["original_content"] == body["content"]
     assert body["suggestions"] == []

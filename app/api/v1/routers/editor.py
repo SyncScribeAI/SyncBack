@@ -18,6 +18,7 @@ from app.api.deps import get_allowed_project, get_current_user
 from app.api.schemas.document import DocumentSectionResponse, SuggestionCounters
 from app.api.schemas.editor import (
     EditorAggregateResponse,
+    EditorBlockResponse,
     EditorContent,
     EditorDocumentMeta,
     EditorPermissions,
@@ -67,6 +68,17 @@ def _build_editor_content(parsed: ParsedDocument) -> EditorContent:
                 end_offset=s.end_offset,
             )
             for s in parsed.sections
+        ],
+        blocks=[
+            EditorBlockResponse(
+                ref=b.ref,
+                type=b.type,
+                start_offset=b.start_offset,
+                end_offset=b.end_offset,
+                editable=b.editable,
+                heading_level=b.heading_level,
+            )
+            for b in parsed.blocks
         ],
     )
 

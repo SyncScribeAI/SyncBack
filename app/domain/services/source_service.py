@@ -302,4 +302,4 @@ class SourceService:
         if self._parser_registry is None:
             raise UnsupportedFormatError("Просмотр источников не настроен")
         raw_bytes = await self._storage.download(source.storage_key)
-        return self._parser_registry.parse_by_filename(source.storage_key, raw_bytes).plain_text
+        return self._parser_registry.extract_text(source.storage_key, raw_bytes)

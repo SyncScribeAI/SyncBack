@@ -51,8 +51,18 @@ class ParsedDocument:
 class DocumentParser(Protocol):
     def parse(self, raw_bytes: bytes) -> ParsedDocument: ...
 
+    def extract_text(self, raw_bytes: bytes) -> str:
+        """Тот же plain_text, что в parse(), но без разбора на блоки и разделы."""
+        ...
+
 
 class IDocumentParserRegistry(Protocol):
-    """Выбор парсера по имени файла. Неподдерживаемый формат → UnsupportedFormatError."""
+    """Выбор парсера по имени файла. Неподдерживаемый формат → UnsupportedFormatError.
+
+    parse_by_filename — для редактора и запроса к ML, где нужны блоки; extract_text —
+    для источников и кэша текста, где блоки были бы лишней работой и памятью.
+    """
 
     def parse_by_filename(self, filename: str, raw_bytes: bytes) -> ParsedDocument: ...
+
+    def extract_text(self, filename: str, raw_bytes: bytes) -> str: ...

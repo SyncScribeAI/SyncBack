@@ -167,7 +167,7 @@ async def _load_document_text(job_id: uuid.UUID, storage_key: str) -> str:
         return plain_text
     try:
         raw_bytes = await _get_storage().download(storage_key)
-        plain_text = _get_parser_registry().parse_by_filename(storage_key, raw_bytes).plain_text
+        plain_text = _get_parser_registry().extract_text(storage_key, raw_bytes)
     except Exception as exc:
         raise DocumentParseError(
             f"Не удалось распарсить документ (storage_key={storage_key}): {exc}"

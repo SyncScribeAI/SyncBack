@@ -10,10 +10,7 @@ from app.domain.interfaces.document_parser import (
 from app.domain.text_normalization import normalize_text
 from app.infrastructure.parsers.line_scanner import iter_lines
 
-_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
-
-# Для блоков заголовок ищется строго в пределах строки: \s+ в _HEADING_RE
-# захватывает перевод строки, а блок не может продолжаться на следующую строку.
+# Заголовок ищется в пределах строки: блок и раздел не продолжаются на следующую строку.
 _HEADING_LINE_RE = re.compile(r"^\s{0,3}(#{1,6})[ \t]+\S")
 _LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d{1,9}[.)])[ \t]+\S")
 _FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
@@ -23,16 +20,25 @@ _TABLE_ROW_PREFIX = "|"
 
 class MarkdownParser:
     def parse(self, raw_bytes: bytes) -> ParsedDocument:
-        text = normalize_text(raw_bytes.decode("utf-8", errors="replace"))
-        matches = list(_HEADING_RE.finditer(text))
-        sections: list[DocumentSection] = []
-        for i, match in enumerate(matches):
-            start = match.start()
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-            sections.append(
-                DocumentSection(ref=match.group(2).strip(), start_offset=start, end_offset=end)
-            )
-        return ParsedDocument(plain_text=text, sections=sections, blocks=_split_blocks(text))
+        text = self.extract_text(raw_bytes)
+        blocks = _split_blocks(text)
+        return ParsedDocument(plain_text=text, sections=_sections_from(blocks, text), blocks=blocks)
+
+    def extract_text(self, raw_bytes: bytes) -> str:
+        return normalize_text(raw_bytes.decode("utf-8", errors="replace"))
+
+
+def _sections_from(blocks: list[ParsedBlock], text: str) -> list[DocumentSection]:
+    """Разделы — это заголовочные блоки, поэтому «# …» внутри кода раздела не открывает."""
+    headings = [b for b in blocks if b.type is DocumentBlockType.HEADING]
+    sections: list[DocumentSection] = []
+    for i, heading in enumerate(headings):
+        end = headings[i + 1].start_offset if i + 1 < len(headings) else len(text)
+        title = heading.text_in(text).lstrip("#").strip()
+        sections.append(
+            DocumentSection(ref=title, start_offset=heading.start_offset, end_offset=end)
+        )
+    return sections
 
 
 def _split_blocks(text: str) -> list[ParsedBlock]:

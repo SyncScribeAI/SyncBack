@@ -26,8 +26,7 @@ class ManualUploadConnector:
         if not source.storage_key:
             raise ValueError(f"storage_key отсутствует для источника {source.id}")
         raw_bytes = await self._storage.download(source.storage_key)
-        parsed = self._parsers.parse_by_filename(source.storage_key, raw_bytes)
-        return parsed.plain_text
+        return self._parsers.extract_text(source.storage_key, raw_bytes)
 
     async def get_metadata(self, source: SourceRef) -> SourceMetadata:
         return SourceMetadata(

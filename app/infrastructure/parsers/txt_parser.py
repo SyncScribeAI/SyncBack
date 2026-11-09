@@ -6,8 +6,11 @@ from app.infrastructure.parsers.line_scanner import iter_lines
 
 class TxtParser:
     def parse(self, raw_bytes: bytes) -> ParsedDocument:
-        text = normalize_text(raw_bytes.decode("utf-8", errors="replace"))
+        text = self.extract_text(raw_bytes)
         return ParsedDocument(plain_text=text, sections=[], blocks=_split_blocks(text))
+
+    def extract_text(self, raw_bytes: bytes) -> str:
+        return normalize_text(raw_bytes.decode("utf-8", errors="replace"))
 
 
 def _split_blocks(text: str) -> list[ParsedBlock]:

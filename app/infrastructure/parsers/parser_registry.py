@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.domain.exceptions import UnsupportedFormatError
-from app.domain.interfaces.document_parser import ParsedDocument
+from app.domain.interfaces.document_parser import DocumentParser, ParsedDocument
 from app.infrastructure.parsers.docx_parser import DocxParser
 from app.infrastructure.parsers.markdown_parser import MarkdownParser
 from app.infrastructure.parsers.txt_parser import TxtParser
@@ -46,6 +46,12 @@ class DocumentParserRegistry:
         return self._EXTENSION_MAP.get(suffix)
 
     def parse_by_filename(self, filename: str, raw_bytes: bytes) -> ParsedDocument:
+        return self._parser_for(filename).parse(raw_bytes)
+
+    def extract_text(self, filename: str, raw_bytes: bytes) -> str:
+        return self._parser_for(filename).extract_text(raw_bytes)
+
+    def _parser_for(self, filename: str) -> DocumentParser:
         suffix = Path(filename).suffix.lower()
 
         if suffix in _BLOCKED_EXTENSIONS:
@@ -55,5 +61,5 @@ class DocumentParserRegistry:
             )
 
         parser_attr = self._get_parser_for_suffix(suffix)
-        parser = getattr(self, parser_attr) if parser_attr else self._txt_parser
-        return parser.parse(raw_bytes)
+        parser: DocumentParser = getattr(self, parser_attr) if parser_attr else self._txt_parser
+        return parser

@@ -10,6 +10,9 @@
 Текст абзаца и фрагменты правок сравниваются после normalize_text: в docx часто стоят
 неразрывные пробелы, а модель возвращает обычные. Нетронутые абзацы остаются как есть;
 в переписанном абзаце NBSP заменяются на обычные пробелы.
+
+Абзацы перебираются в том же порядке, что и в DocxParser (тело и ячейки таблиц), —
+иначе «первое вхождение» old_text в plain_text и в файле указывало бы на разные места.
 """
 
 import io
@@ -20,6 +23,7 @@ from docx.text.paragraph import Paragraph
 
 from app.domain.interfaces.document_exporter import AppliedChange
 from app.domain.text_normalization import normalize_text
+from app.infrastructure.docx_paragraphs import iter_docx_paragraphs
 
 
 def _set_paragraph_text(paragraph: Paragraph, new_text: str) -> None:
@@ -42,7 +46,8 @@ def _place_addition(document: Any, change: AppliedChange) -> None:
     anchor = normalize_text(change.old_text or "").strip()
     if not anchor:
         return
-    for paragraph in document.paragraphs:
+    for item in iter_docx_paragraphs(document):
+        paragraph = item.paragraph
         if anchor in normalize_text(paragraph.text):
             _insert_paragraph_after(paragraph, change.new_text or "")
             return
@@ -54,7 +59,8 @@ class DocxExporter:
         for change in changes:
             old_text = normalize_text(change.old_text or "")
             if change.change_type in ("modify", "delete") and old_text:
-                for paragraph in document.paragraphs:
+                for item in iter_docx_paragraphs(document):
+                    paragraph = item.paragraph
                     paragraph_text = normalize_text(paragraph.text)
                     if old_text in paragraph_text:
                         new_text = paragraph_text.replace(old_text, change.new_text or "", 1)

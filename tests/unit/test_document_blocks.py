@@ -10,9 +10,12 @@ import pytest
 from docx import Document as DocxDocument
 
 from app.domain.document_blocks import DocumentBlocksBuilder, block_ref
+from app.domain.interfaces.document_exporter import AppliedChange
 from app.domain.interfaces.document_parser import DocumentBlockType, ParsedDocument
+from app.infrastructure.exporters.docx_exporter import DocxExporter
 from app.infrastructure.parsers.docx_parser import DocxParser
 from app.infrastructure.parsers.markdown_parser import MarkdownParser
+from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 from app.infrastructure.parsers.txt_parser import TxtParser
 
 H = DocumentBlockType.HEADING
@@ -193,3 +196,101 @@ def test_block_ref_prefixes() -> None:
         "t-3",
         "o-3",
     ]
+
+
+# --- таблицы .docx ------------------------------------------------------------
+
+
+def _docx_with_table() -> bytes:
+    """Абзац, таблица 2×2 с объединённой шапкой и вложенной таблицей, абзац."""
+    document = DocxDocument()
+    document.add_paragraph("До таблицы")
+    table = document.add_table(rows=2, cols=2)
+    header = table.cell(0, 0).merge(table.cell(0, 1))
+    header.text = "Тарифы"
+    table.cell(1, 0).text = "Цена"
+    price = table.cell(1, 1)
+    price.text = "100 руб."
+    nested = price.add_table(rows=1, cols=1)
+    nested.cell(0, 0).text = "НДС включён"
+    document.add_paragraph("После таблицы")
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+def test_docx_tables_are_read_in_document_order_without_duplicates() -> None:
+    parsed = DocxParser().parse(_docx_with_table())
+    _assert_invariants(parsed)
+    assert _summary(parsed) == [
+        (P, "До таблицы"),
+        (T, "Тарифы"),
+        (T, "Цена"),
+        (T, "100 руб."),
+        (T, "НДС включён"),
+        (P, "После таблицы"),
+    ]
+    # Объединённая шапка — одна физическая ячейка, её текст не задваивается.
+    assert parsed.plain_text.count("Тарифы") == 1
+    assert [b.editable for b in parsed.blocks] == [True, False, False, False, False, True]
+
+
+def test_docx_heading_style_inside_table_is_not_a_section() -> None:
+    document = DocxDocument()
+    document.add_heading("Раздел", level=1)
+    cell = document.add_table(rows=1, cols=1).cell(0, 0)
+    cell.paragraphs[0].text = "Шапка ячейки"
+    cell.paragraphs[0].style = document.styles["Heading 2"]
+    buffer = io.BytesIO()
+    document.save(buffer)
+    parsed = DocxParser().parse(buffer.getvalue())
+    assert [s.ref for s in parsed.sections] == ["Раздел"]
+    assert _summary(parsed) == [(H, "Раздел"), (T, "Шапка ячейки")]
+
+
+def test_docx_export_applies_change_inside_table_cell() -> None:
+    change = AppliedChange(
+        section_ref="", change_type="modify", old_text="100 руб.", new_text="120 руб."
+    )
+    exported = DocxExporter().apply_changes(_docx_with_table(), [change])
+    text = DocxParser().extract_text(exported)
+    assert "120 руб." in text
+    assert "100 руб." not in text
+
+
+# --- разделы markdown из заголовков -------------------------------------------
+
+
+def test_markdown_sections_ignore_hashes_inside_code() -> None:
+    raw = "# Установка\n\n```bash\n# комментарий\npip install x\n```\n\n## Запуск\nrun\n"
+    parsed = MarkdownParser().parse(raw.encode())
+    assert [(s.ref, s.start_offset) for s in parsed.sections] == [
+        ("Установка", 0),
+        ("Запуск", raw.index("## Запуск")),
+    ]
+    assert parsed.sections[0].end_offset == parsed.sections[1].start_offset
+    assert parsed.sections[-1].end_offset == len(parsed.plain_text)
+
+
+def test_markdown_heading_does_not_swallow_next_line() -> None:
+    parsed = MarkdownParser().parse(b"#\ntext\n")
+    assert parsed.sections == []
+    assert _summary(parsed) == [(P, "#\ntext")]
+
+
+# --- extract_text ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("filename", "raw"),
+    [
+        ("spec.txt", "Alpha\r\n\r\nBeta\u00a0x".encode()),
+        ("spec.md", "# A\n```\n# b\n```\nтекст\u00a0x\n".encode()),
+        ("spec.docx", _docx_with_table()),
+    ],
+)
+def test_extract_text_matches_parse_plain_text(filename: str, raw: bytes) -> None:
+    registry = DocumentParserRegistry()
+    assert (
+        registry.extract_text(filename, raw) == registry.parse_by_filename(filename, raw).plain_text
+    )

@@ -1,6 +1,6 @@
 import re
 
-from app.domain.document_blocks import DocumentBlocksBuilder
+from app.domain.document_blocks import DocumentBlocksBuilder, heading_title
 from app.domain.interfaces.document_parser import (
     DocumentBlockType,
     DocumentSection,
@@ -38,7 +38,7 @@ def _sections_from(blocks: list[ParsedBlock], text: str) -> list[DocumentSection
     sections: list[DocumentSection] = []
     for i, heading in enumerate(headings):
         end = headings[i + 1].start_offset if i + 1 < len(headings) else len(text)
-        title = heading.text_in(text).lstrip("#").strip()
+        title = heading_title(heading.text_in(text))
         sections.append(
             DocumentSection(ref=title, start_offset=heading.start_offset, end_offset=end)
         )

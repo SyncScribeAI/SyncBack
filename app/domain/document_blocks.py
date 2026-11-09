@@ -28,6 +28,15 @@ def block_ref(block_type: DocumentBlockType, position: int) -> str:
     return f"{_REF_PREFIX[block_type]}-{position}"
 
 
+def heading_title(heading_text: str) -> str:
+    """Название раздела по тексту блока-заголовка: «## Тарифы» → «Тарифы».
+
+    Одно правило для разделов редактора и section_ref правок: фронт сопоставляет их
+    по строке, и любое расхождение в обрезке оставит правку без раздела.
+    """
+    return heading_text.lstrip("#").strip()
+
+
 class DocumentBlocksBuilder:
     """Накопитель блоков с проверкой инвариантов за O(1) на блок.
 

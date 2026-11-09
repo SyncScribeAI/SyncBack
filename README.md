@@ -119,6 +119,25 @@ LLM_CA_BUNDLE=/srv/app/certs/russian_trusted_root_ca.pem
 
 Проверить подключение можно запросом `GET /api/v1/system/llm-health` (только для роли `admin`): он вызывает `GET {LLM_ENDPOINT}/models` и тем самым проверяет и адрес, и авторизацию.
 
+### Подключение ML-конвейера (контракт 2.0)
+
+Конвейер анализирует документ целиком со всеми источниками за один запрос: документ уходит блоками (`block_id`, тип, текст, признак `editable`), источники — текстом в едином формате (заголовки `#`, пункты `- `, строки таблиц `| … |`). Порт — `DocumentAnalyzer` (`app/domain/interfaces/document_analyzer.py`), JSON контракта — только в `app/infrastructure/ml_pipeline/schemas.py`. Пример запроса и ответов — `tests/fixtures/ml_contract/`.
+
+Способ подключения выбирается `ANALYSIS_PROVIDER`:
+
+- `legacy_llm` — по умолчанию: прежний анализ «документ × источник» через `LLM_*`;
+- `ml_plugin` — конвейер установлен Python-пакетом в образ воркера; `ML_PLUGIN_ENTRYPOINT=package.module:function` — функция «dict запроса → dict ответа». Функция импортируется при старте воркера и вызывается в отдельном потоке с дедлайном `ML_WAIT_SECONDS`;
+- `ml_http` — конвейер как сервис: `POST {ML_ENDPOINT}` с JSON запроса. Ответ — сразу `200` с ответом контракта или `202 {request_id}` и опрос `GET {ML_ENDPOINT}/{request_id}` каждые `ML_POLL_SECONDS`, пока статус `queued`/`running`. Сетевые сбои, `429` и `5xx` повторяются (`ML_MAX_RETRIES`), `4xx` — нет. Ключ `ML_API_KEY` передаётся как `Bearer`;
+- `stub` — заглушка с правками по реальным блокам документа, для разработки интерфейса.
+
+```env
+ANALYSIS_PROVIDER=ml_http
+ML_ENDPOINT=http://ml-pipeline:8080/v2/analyze
+ML_HTTP_MODE=async
+```
+
+`ML_WAIT_SECONDS` должен быть меньше `ANALYSIS_TASK_TIME_LIMIT_SECONDS`: запас нужен на загрузку источников и запись результата. Лимиты запроса `ANALYSIS_MAX_*` проверяются до вызова конвейера; превышение — ошибка `LLM_INPUT_TOO_LARGE`.
+
 ### Авторизация
 
 Авторизация отделена от транспорта (`app/infrastructure/llm/auth.py`). Новый способ авторизации добавляется как новая стратегия, а не как новый клиент.

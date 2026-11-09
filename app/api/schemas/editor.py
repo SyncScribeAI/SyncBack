@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app.api.schemas.document import DocumentSectionResponse, SuggestionCounters
 from app.api.schemas.suggestion import SuggestionResponse
+from app.domain.interfaces.document_parser import DocumentBlockType
 from app.domain.value_objects import DocumentStatusVO
 
 
@@ -24,9 +25,22 @@ class EditorDocumentMeta(BaseModel):
     view_mode: str = "original"
 
 
+class EditorBlockResponse(BaseModel):
+    """Блок документа без текста: текст фронт берёт из plain_text по смещениям,
+    чтобы ответ не дублировал документ целиком."""
+
+    ref: str
+    type: DocumentBlockType
+    start_offset: int
+    end_offset: int
+    editable: bool
+    heading_level: int | None = None
+
+
 class EditorContent(BaseModel):
     plain_text: str
     sections: list[DocumentSectionResponse] = []
+    blocks: list[EditorBlockResponse] = []
 
 
 class EditorPermissions(BaseModel):

@@ -50,6 +50,7 @@ include = ["app*"]
 asyncio_mode = "auto"
 markers = [
     "integration: тесты, которым нужны реальные Postgres/Redis/S3-хранилище (SeaweedFS)",
+    "perf: бюджеты сложности и памяти; идут в обычном прогоне, отдельный маркер — для выборочного запуска",
 ]
 
 [tool.ruff]

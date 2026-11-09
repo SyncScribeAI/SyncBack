@@ -17,9 +17,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 from app.domain.exceptions import InvalidDocumentStatusError
+from app.domain.interfaces.document_analyzer import (
+    AnalysisErrorCode,
+    AnalysisResult,
+    AnalysisStatus,
+)
 from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO
 
 _DOCUMENT_TRANSITIONS: dict[DocumentStatusVO, frozenset[DocumentStatusVO]] = {
@@ -143,6 +151,23 @@ _JOB_TRANSITIONS: dict[AnalysisJobStatusVO, frozenset[AnalysisJobStatusVO]] = {
 }
 
 
+# Пределы совпадают с соглашением по логам и error_message задачи.
+_ERROR_MESSAGE_MAX = 500
+
+
+@dataclass(frozen=True, slots=True)
+class JobOutcome:
+    """Исход задачи по результату конвейера.
+
+    retryable — сбой временный, задачу можно повторить; сколько раз — решает воркер.
+    """
+
+    status: AnalysisJobStatusVO
+    error_code: str | None = None
+    error_message: str | None = None
+    retryable: bool = False
+
+
 class AnalysisJobLifecycle:
     """Переходы задачи анализа и их отражение на статусе документа.
 
@@ -205,3 +230,47 @@ class AnalysisJobLifecycle:
                 else DocumentStatusVO.READY
             )
         return DocumentStatusVO.DRAFT
+
+    @staticmethod
+    def outcome_for(result: AnalysisResult, failed_sources: Sequence[str] = ()) -> JobOutcome:
+        """Исход задачи анализа v2.
+
+        failed — по коду ошибки: invalid_request означает ошибку нашего запроса, повтор не
+        поможет; остальное — временный сбой конвейера. completed — успех, если проверены все
+        блоки и все источники дошли до запроса; иначе partial_success: правки сохраняются,
+        но пользователь должен знать, что часть документа или источников не учтена.
+        """
+        if result.status is AnalysisStatus.FAILED:
+            message = _truncate(result.error.message if result.error else "")
+            if result.error and result.error.code is AnalysisErrorCode.INVALID_REQUEST:
+                return JobOutcome(AnalysisJobStatusVO.FAILED, "ML_INVALID_REQUEST", message)
+            return JobOutcome(AnalysisJobStatusVO.FAILED, "LLM_UNAVAILABLE", message, True)
+        problems: list[str] = []
+        failed_blocks = _failed_block_count(result.meta)
+        if failed_blocks:
+            problems.append(f"{failed_blocks} блоков не удалось проверить")
+        if failed_sources:
+            problems.append("недоступны источники: " + ", ".join(failed_sources))
+        if problems:
+            return JobOutcome(
+                AnalysisJobStatusVO.PARTIAL_SUCCESS,
+                "PARTIAL_FAILURE",
+                _truncate("; ".join(problems)),
+            )
+        return JobOutcome(AnalysisJobStatusVO.SUCCESS)
+
+
+def _failed_block_count(meta: Mapping[str, Any]) -> int:
+    """meta.errors читается мягко: состав meta не зафиксирован контрактом."""
+    value = meta.get("errors")
+    if isinstance(value, bool) or not isinstance(value, int | float) or value != value:
+        return 0
+    return max(int(value), 0)
+
+
+def _truncate(message: str) -> str | None:
+    if not message:
+        return None
+    return (
+        message if len(message) <= _ERROR_MESSAGE_MAX else message[: _ERROR_MESSAGE_MAX - 1] + "…"
+    )

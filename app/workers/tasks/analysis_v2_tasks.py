@@ -2,12 +2,12 @@
 
 Одна задача на документ вместо chord по источникам: документ разбирается один раз, все
 источники уходят в один запрос к DocumentAnalyzer, ответ разбирается одним проходом и
-пишется одним bulk_create.
+пишется одним bulk_create вместе с флагами «проверьте вручную».
 
 Шаги: задача → processing; блоки документа из файла; тексты источников параллельно (не
 больше ANALYSIS_SOURCE_FETCH_CONCURRENCY одновременно); лимиты запроса; вызов адаптера;
 доменный маппер; группы правок одной фразы (и догоняющие правки при
-SUGGESTION_PROPAGATE_EXACT); запись правок и статусов.
+SUGGESTION_PROPAGATE_EXACT); запись правок, флагов и статусов.
 
 Повторная доставка и отмена. Результат пишется под блокировкой строки задачи
 (lock_if_active) только пока она активна: вторая доставка той же задачи или отмена
@@ -64,7 +64,7 @@ from app.domain.interfaces.source_connector import SourceRef
 from app.domain.lifecycle import AnalysisJobLifecycle
 from app.domain.pipeline_run import PipelineRunSummary, summarize_run
 from app.domain.services.analysis_request_builder import DocumentInput, build_analysis_request
-from app.domain.services.analysis_result_mapper import SuggestionDraft, map_result
+from app.domain.services.analysis_result_mapper import FlagDraft, SuggestionDraft, map_result
 from app.domain.services.suggestion_groups import PropagationLimits, finalize_drafts
 from app.domain.source_text import ensure_source_fits
 from app.domain.value_objects import AnalysisJobStatusVO
@@ -72,6 +72,7 @@ from app.infrastructure.db.session import isolated_uow
 from app.infrastructure.ml_pipeline.factory import analysis_limits, get_document_analyzer
 from app.infrastructure.ml_pipeline.schemas import CONTRACT_VERSION, encode_request
 from app.workers.celery_app import celery_app
+from app.workers.pipeline.flag_drafts import to_flags
 from app.workers.pipeline.suggestion_drafts import to_suggestions
 from app.workers.tasks.job_completion import complete_job
 from app.workers.tasks.runtime import (
@@ -199,13 +200,14 @@ async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
     if outcome.status is AnalysisJobStatusVO.FAILED:
         raise _JobFailed(outcome.error_code or "LLM_UNAVAILABLE", outcome.error_message or "", run)
 
-    drafts = _map(job.id, attempt, result, request)
+    drafts, flags = _map(job.id, attempt, result, request)
     await finish(
         job.id,
         outcome.status,
         outcome.error_code,
         outcome.error_message,
         drafts=drafts,
+        flags=flags,
         source_ids=fetched.ids,
         run=run,
     )
@@ -361,8 +363,8 @@ def _log_call(
 
 def _map(
     job_id: uuid.UUID, attempt: int, result: AnalysisResult, request: AnalysisRequest
-) -> list[SuggestionDraft]:
-    mapped = map_result(result, request.document.blocks)
+) -> tuple[list[SuggestionDraft], list[FlagDraft]]:
+    mapped = map_result(result, request.document.blocks, max_flags=_settings.analysis_max_flags)
     if mapped.dropped:
         logger.warning(
             "Анализ v2: часть правок отброшена",
@@ -374,12 +376,6 @@ def _map(
                 "dropped_total": sum(mapped.dropped.values()),
             },
         )
-    if mapped.flags:
-        # Хранение флагов — отдельный пакет (B7); до него — только счётчик в логе.
-        logger.info(
-            "Анализ v2: флаги ручной проверки не сохранены",
-            extra={"job_id": str(job_id), "flags": len(mapped.flags)},
-        )
     drafts = finalize_drafts(mapped.suggestions, request.document.blocks, _propagation())
     propagated = len(drafts) - len(mapped.suggestions)
     if propagated:
@@ -387,7 +383,7 @@ def _map(
             "Анализ v2: добавлены догоняющие правки",
             extra={"job_id": str(job_id), "propagated": propagated},
         )
-    return drafts
+    return drafts, mapped.flags
 
 
 def _propagation() -> PropagationLimits | None:
@@ -437,6 +433,7 @@ async def finish(
     error_message: str | None = None,
     *,
     drafts: Sequence[SuggestionDraft] = (),
+    flags: Sequence[FlagDraft] = (),
     source_ids: Sequence[uuid.UUID] = (),
     run: PipelineRunSummary | None = None,
 ) -> bool:
@@ -459,6 +456,7 @@ async def finish(
             await uow.suggestions.bulk_create(
                 to_suggestions(drafts, job_id=job.id, document_id=document.id, sources=sources)
             )
+        await uow.flags.bulk_create(to_flags(flags, job_id=job.id, document_id=document.id))
         outbox = await complete_job(
             uow,
             job,
@@ -472,7 +470,12 @@ async def finish(
         await outbox.flush(uow)
     logger.info(
         "Анализ v2 завершён",
-        extra={"job_id": str(job_id), "status": status.value, "suggestions": len(drafts)},
+        extra={
+            "job_id": str(job_id),
+            "status": status.value,
+            "suggestions": len(drafts),
+            "flags": len(flags),
+        },
     )
     return True
 

@@ -21,6 +21,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.unit_of_work import IUnitOfWork
+from app.infrastructure.db.repositories.analysis_flag_repository import AnalysisFlagRepository
 from app.infrastructure.db.repositories.analysis_job_repository import AnalysisJobRepository
 from app.infrastructure.db.repositories.analysis_job_source_repository import (
     AnalysisJobSourceRepository,
@@ -47,6 +48,7 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
         # Core repositories
         self.documents = DocumentRepository(session)
         self.suggestions = SuggestionRepository(session)
+        self.flags = AnalysisFlagRepository(session)
         self.jobs = AnalysisJobRepository(session)
         self.audit = AuditLogRepository(session)
 

@@ -66,6 +66,19 @@ class SuggestionProtocol(Protocol):
 
 
 @runtime_checkable
+class AnalysisFlagProtocol(Protocol):
+    """Минимальный контракт флага ручной проверки, нужный AnalysisFlagService."""
+
+    id: uuid.UUID
+    analysis_job_id: uuid.UUID
+    document_id: uuid.UUID
+    # У ORM-модели строка с CHECK, а не enum PostgreSQL; домен сравнивает с FlagStatusVO.
+    status: str
+    decided_by: uuid.UUID | None
+    decided_at: datetime | None
+
+
+@runtime_checkable
 class UserProtocol(Protocol):
     """Минимальный контракт пользователя, нужный AuthService.
 

@@ -12,6 +12,10 @@ from app.infrastructure.db.models.enums import AuditAction
 
 _values = lambda e: [m.value for m in e]  # noqa: E731
 
+# Действия над документом целиком, без правки. Решения по флагам — тоже здесь:
+# у флага нет строки в suggestions, его id пишется в details.flag_id.
+DOCUMENT_ACTIONS_SQL = "'download', 'finalize', 'finalize_review', 'flag_review', 'flag_reopen'"
+
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
@@ -23,9 +27,9 @@ class AuditLog(Base):
         ),
         # Действия над документом не ссылаются на правку, остальные — ссылаются.
         sa.CheckConstraint(
-            "(action IN ('download', 'finalize', 'finalize_review') "
+            f"(action IN ({DOCUMENT_ACTIONS_SQL}) "
             "AND document_id IS NOT NULL AND suggestion_id IS NULL) OR "
-            "(action NOT IN ('download', 'finalize', 'finalize_review') "
+            f"(action NOT IN ({DOCUMENT_ACTIONS_SQL}) "
             "AND suggestion_id IS NOT NULL)",
             name="ck_audit_logs_target",
         ),

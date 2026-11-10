@@ -5,8 +5,8 @@ POST /projects/{project_id}/documents/{document_id}/editor/reset
 
 Агрегат возвращает метаданные документа, содержимое (и оригинал до правок для
 документов с результатами ревью), страницу правок с полным счётчиком
-suggestions_total, агрегатные счётчики по статусам и права действий из
-DocumentLifecycle.
+suggestions_total, агрегатные счётчики по статусам, флаги «проверьте вручную»
+текущего анализа и права действий из DocumentLifecycle.
 """
 
 import asyncio
@@ -15,18 +15,21 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.api.deps import get_allowed_project, get_current_user
-from app.api.schemas.document import DocumentSectionResponse, SuggestionCounters
+from app.api.schemas.document import DocumentSectionResponse
 from app.api.schemas.editor import (
     EditorAggregateResponse,
     EditorBlockResponse,
     EditorContent,
+    EditorCounters,
     EditorDocumentMeta,
     EditorPermissions,
     ResetResponse,
     SuggestionGroupResponse,
 )
+from app.api.schemas.flag import AnalysisFlagResponse
 from app.api.schemas.suggestion import SuggestionResponse
 from app.core.dependencies import (
+    get_analysis_flag_service,
     get_analysis_job_service,
     get_document_service,
     get_suggestion_service,
@@ -34,10 +37,11 @@ from app.core.dependencies import (
 from app.domain.exceptions import DocumentNotFoundError, InvalidDocumentStatusError
 from app.domain.interfaces.document_parser import ParsedDocument
 from app.domain.lifecycle import DocumentLifecycle
+from app.domain.services.analysis_flag_service import AnalysisFlagService
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.domain.services.document_service import DocumentService
 from app.domain.services.suggestion_service import SuggestionService
-from app.domain.value_objects import DocumentStatusVO, PaginationParams
+from app.domain.value_objects import DocumentStatusVO, FlagStatusVO, PaginationParams
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.user import User
@@ -91,6 +95,7 @@ async def get_editor_aggregate(
     current_user: User = Depends(get_current_user),
     document_service: DocumentService = Depends(get_document_service),
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
+    flag_service: AnalysisFlagService = Depends(get_analysis_flag_service),
     suggestions_limit: int = Query(
         default=50,
         ge=1,
@@ -147,6 +152,7 @@ async def get_editor_aggregate(
     )
     status_counts = await suggestion_service.count_by_document_and_status(project.id, document_id)
     groups = await suggestion_service.list_suggestion_groups(project.id, document_id)
+    flags = await flag_service.list_for_document(project.id, document_id)
 
     original_content = original_content_raw if needs_original else editor_content
 
@@ -156,11 +162,13 @@ async def get_editor_aggregate(
     accepted = status_counts.get("accepted", 0)
     rejected = status_counts.get("rejected", 0)
 
-    counters = SuggestionCounters(
+    counters = EditorCounters(
         total=suggestions_total,
         pending=pending,
         accepted=accepted,
         rejected=rejected,
+        # Флаги уже загружены целиком, отдельный COUNT не нужен.
+        flags_pending=sum(1 for f in flags if f.status == FlagStatusVO.PENDING.value),
     )
 
     permissions = EditorPermissions(
@@ -180,6 +188,7 @@ async def get_editor_aggregate(
         counters=counters,
         permissions=permissions,
         suggestion_groups=[SuggestionGroupResponse.model_validate(g) for g in groups],
+        flags=[AnalysisFlagResponse.model_validate(f) for f in flags],
     )
 
 
@@ -207,8 +216,8 @@ async def reset_analysis(
     current_user: User = Depends(get_current_user),
     job_service: AnalysisJobService = Depends(get_analysis_job_service),
 ) -> ResetResponse:
-    """Сбросить все правки текущего анализа: статус suggestions → pending,
-    документ → AWAITING_APPROVAL.
+    """Сбросить все правки и отметки флагов текущего анализа: статус suggestions и
+    флагов → pending, документ → AWAITING_APPROVAL.
     """
     try:
         reset_result = await job_service.reset_analysis(project.id, document_id)
@@ -229,4 +238,5 @@ async def reset_analysis(
         document_status=new_status,
         review_version=new_review_version,
         suggestions_reset_count=suggestions_reset_count,
+        flags_reset_count=reset_result.flags_reset_count,
     )

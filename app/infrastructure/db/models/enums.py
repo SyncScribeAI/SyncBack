@@ -48,3 +48,5 @@ class AuditAction(enum.StrEnum):
     REOPEN = "reopen"
     RESET = "reset"  # синхронизировано с AuditActionVO
     DOWNLOAD = "download"
+    FLAG_REVIEW = "flag_review"  # синхронизировано с AuditActionVO
+    FLAG_REOPEN = "flag_reopen"

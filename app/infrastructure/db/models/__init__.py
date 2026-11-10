@@ -3,6 +3,7 @@
 для того, чтобы Base.metadata содержала все таблицы.
 """
 
+from app.infrastructure.db.models.analysis_flag import AnalysisFlag  # noqa: F401
 from app.infrastructure.db.models.analysis_job import AnalysisJob  # noqa: F401
 from app.infrastructure.db.models.analysis_job_source import AnalysisJobSource  # noqa: F401
 from app.infrastructure.db.models.audit_log import AuditLog  # noqa: F401

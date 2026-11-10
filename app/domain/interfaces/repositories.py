@@ -17,6 +17,7 @@ from app.domain.value_objects import (
     AnalysisJobStatusVO,
     DocumentFormatVO,
     DocumentStatusVO,
+    FlagStatusVO,
     ProjectContentCounts,
     SourceScopeVO,
     SuggestionGroupSummary,
@@ -24,6 +25,7 @@ from app.domain.value_objects import (
 )
 
 if TYPE_CHECKING:
+    from app.infrastructure.db.models.analysis_flag import AnalysisFlag
     from app.infrastructure.db.models.analysis_job import AnalysisJob
     from app.infrastructure.db.models.audit_log import AuditLog
     from app.infrastructure.db.models.document import Document
@@ -255,6 +257,36 @@ class ISourceRepository(ABC):
 
     @abstractmethod
     async def delete(self, source: Source) -> None: ...
+
+
+class IAnalysisFlagRepository(ABC):
+    """Флаги «проверьте вручную» одного анализа."""
+
+    @abstractmethod
+    async def bulk_create(self, flags: Sequence[AnalysisFlag]) -> None: ...
+
+    @abstractmethod
+    async def get_by_id(self, flag_id: uuid.UUID) -> AnalysisFlag | None: ...
+
+    @abstractmethod
+    async def list_by_analysis_job(self, analysis_job_id: uuid.UUID) -> list[AnalysisFlag]:
+        """Все флаги анализа в порядке ответа конвейера (position)."""
+        ...
+
+    @abstractmethod
+    async def set_status(
+        self, flag: AnalysisFlag, status: FlagStatusVO, user_id: uuid.UUID
+    ) -> bool:
+        """Сменить статус одним UPDATE ... WHERE status <> :status.
+
+        False — флаг уже в этом статусе; повторное нажатие не пишет второе событие аудита.
+        """
+        ...
+
+    @abstractmethod
+    async def reset_to_pending(self, analysis_job_id: uuid.UUID) -> int:
+        """Вернуть просмотренные флаги анализа в pending; число затронутых строк."""
+        ...
 
 
 class ISuggestionRepository(ABC):

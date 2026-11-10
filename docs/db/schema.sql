@@ -1,4 +1,4 @@
--- Схема БД SyncScribe после alembic upgrade head (ревизия 0034).
+-- Схема БД SyncScribe после alembic upgrade head (ревизия 0035).
 -- Получено командой: pg_dump --schema-only --no-owner --no-privileges.
 -- Источник истины — миграции в alembic/versions; файл обновляется вместе с ними.
 
@@ -64,7 +64,9 @@ CREATE TYPE public.audit_action AS ENUM (
     'reopen',
     'bulk_reject',
     'finalize_review',
-    'reset'
+    'reset',
+    'flag_review',
+    'flag_reopen'
 );
 
 
@@ -174,6 +176,29 @@ CREATE TABLE public.alembic_version (
 
 
 --
+-- Name: analysis_flags; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.analysis_flags (
+    id uuid NOT NULL,
+    analysis_job_id uuid NOT NULL,
+    document_id uuid NOT NULL,
+    block_id character varying(255) NOT NULL,
+    section_ref character varying(500) NOT NULL,
+    reason character varying(64) NOT NULL,
+    original_text text NOT NULL,
+    rationale text,
+    quotes jsonb NOT NULL,
+    "position" integer NOT NULL,
+    status character varying(16) DEFAULT 'pending'::character varying NOT NULL,
+    decided_by uuid,
+    decided_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_analysis_flags_status CHECK (((status)::text = ANY ((ARRAY['pending'::character varying, 'reviewed'::character varying])::text[])))
+);
+
+
+--
 -- Name: analysis_job_sources; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -227,7 +252,7 @@ CREATE TABLE public.audit_logs (
     document_id uuid,
     details jsonb,
     CONSTRAINT ck_audit_logs_ref_not_null CHECK (((suggestion_id IS NOT NULL) OR (document_id IS NOT NULL))),
-    CONSTRAINT ck_audit_logs_target CHECK ((((action = ANY (ARRAY['download'::public.audit_action, 'finalize'::public.audit_action, 'finalize_review'::public.audit_action])) AND (document_id IS NOT NULL) AND (suggestion_id IS NULL)) OR ((action <> ALL (ARRAY['download'::public.audit_action, 'finalize'::public.audit_action, 'finalize_review'::public.audit_action])) AND (suggestion_id IS NOT NULL))))
+    CONSTRAINT ck_audit_logs_target CHECK ((((action = ANY (ARRAY['download'::public.audit_action, 'finalize'::public.audit_action, 'finalize_review'::public.audit_action, 'flag_review'::public.audit_action, 'flag_reopen'::public.audit_action])) AND (document_id IS NOT NULL) AND (suggestion_id IS NULL)) OR ((action <> ALL (ARRAY['download'::public.audit_action, 'finalize'::public.audit_action, 'finalize_review'::public.audit_action, 'flag_review'::public.audit_action, 'flag_reopen'::public.audit_action])) AND (suggestion_id IS NOT NULL))))
 );
 
 
@@ -401,6 +426,14 @@ ALTER TABLE ONLY public.alembic_version
 
 
 --
+-- Name: analysis_flags analysis_flags_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.analysis_flags
+    ADD CONSTRAINT analysis_flags_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: analysis_job_sources analysis_job_sources_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -534,6 +567,27 @@ ALTER TABLE ONLY public.document_blocks
 
 ALTER TABLE ONLY public.users
     ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ix_analysis_flags_decided_by; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_analysis_flags_decided_by ON public.analysis_flags USING btree (decided_by) WHERE (decided_by IS NOT NULL);
+
+
+--
+-- Name: ix_analysis_flags_document_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_analysis_flags_document_id ON public.analysis_flags USING btree (document_id);
+
+
+--
+-- Name: ix_analysis_flags_job_position; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_analysis_flags_job_position ON public.analysis_flags USING btree (analysis_job_id, "position");
 
 
 --
@@ -702,6 +756,30 @@ CREATE UNIQUE INDEX uq_analysis_jobs_one_active_per_document ON public.analysis_
 --
 
 CREATE UNIQUE INDEX uq_document_blocks_doc_position ON public.document_blocks USING btree (document_id, "position");
+
+
+--
+-- Name: analysis_flags analysis_flags_analysis_job_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.analysis_flags
+    ADD CONSTRAINT analysis_flags_analysis_job_id_fkey FOREIGN KEY (analysis_job_id) REFERENCES public.analysis_jobs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: analysis_flags analysis_flags_decided_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.analysis_flags
+    ADD CONSTRAINT analysis_flags_decided_by_fkey FOREIGN KEY (decided_by) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: analysis_flags analysis_flags_document_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.analysis_flags
+    ADD CONSTRAINT analysis_flags_document_id_fkey FOREIGN KEY (document_id) REFERENCES public.documents(id) ON DELETE CASCADE;
 
 
 --

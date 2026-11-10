@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, TypedDict
 
 from app.domain.interfaces.user_repository import IUserRepository  # noqa: F401
+from app.domain.pipeline_run import PipelineRunSummary
 from app.domain.value_objects import (
     AnalysisJobStatusVO,
     DocumentFormatVO,
@@ -448,6 +449,11 @@ class IAnalysisJobRepository(ABC):
         Запись результата и смена статуса под этой блокировкой не дают двум доставкам
         одной задачи сохранить правки дважды.
         """
+        ...
+
+    @abstractmethod
+    async def record_pipeline_run(self, job: AnalysisJob, run: PipelineRunSummary) -> None:
+        """Сохранить сводку вызова ML вместе с задачей; фиксация — на вызывающем."""
         ...
 
     @abstractmethod

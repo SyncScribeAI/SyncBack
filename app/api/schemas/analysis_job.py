@@ -26,6 +26,12 @@ class AnalysisJobResponse(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
     partial_success: bool = False
+    checked_blocks: int | None = Field(
+        default=None, description="Сколько блоков проверил ML-конвейер; None — неизвестно"
+    )
+    failed_blocks: int | None = Field(
+        default=None, description="Сколько блоков конвейер не смог проверить; None — неизвестно"
+    )
     model_config = {"from_attributes": True}
 
 

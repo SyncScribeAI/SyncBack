@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.exceptions import AnalysisJobConflictError
 from app.domain.interfaces.repositories import IAnalysisJobRepository
 from app.domain.lifecycle import AnalysisJobLifecycle
+from app.domain.pipeline_run import PipelineRunSummary
 from app.domain.value_objects import AnalysisJobStatusVO, KeysetPage, PaginationParams
 from app.infrastructure.db.models.analysis_job import AnalysisJob
 from app.infrastructure.db.models.document import Document
@@ -183,6 +184,16 @@ class AnalysisJobRepository(IAnalysisJobRepository):
             .execution_options(populate_existing=True)
         )
         return result.scalar_one_or_none()
+
+    async def record_pipeline_run(self, job: AnalysisJob, run: PipelineRunSummary) -> None:
+        job.request_id = run.request_id
+        job.pipeline_meta = {
+            "contract_version": run.contract_version,
+            "provider": run.provider,
+            "meta": None if run.meta is None else dict(run.meta),
+        }
+        job.checked_blocks = run.checked_blocks
+        job.failed_blocks = run.failed_blocks
 
     async def update_status(
         self,

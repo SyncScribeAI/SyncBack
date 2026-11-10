@@ -20,10 +20,17 @@ from app.domain.interfaces.source_connector import SourceKind
 
 @dataclass(frozen=True, slots=True)
 class BlockPayload:
+    """Блок в запросе к ML.
+
+    start_offset — начало блока в plain_text документа. В запрос он не уходит: по нему
+    маппер переводит фрагмент правки из координат блока в координаты документа.
+    """
+
     ref: str
     type: DocumentBlockType
     text: str
     editable: bool
+    start_offset: int = 0
 
     def __post_init__(self) -> None:
         # Блок без ref или текста конвейер отклонит как invalid_request — это наша ошибка,

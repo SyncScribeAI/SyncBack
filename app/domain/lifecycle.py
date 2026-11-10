@@ -17,10 +17,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
 
 from app.domain.exceptions import InvalidDocumentStatusError
 from app.domain.interfaces.document_analyzer import (
@@ -28,6 +27,7 @@ from app.domain.interfaces.document_analyzer import (
     AnalysisResult,
     AnalysisStatus,
 )
+from app.domain.pipeline_run import failed_block_count
 from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO
 
 _DOCUMENT_TRANSITIONS: dict[DocumentStatusVO, frozenset[DocumentStatusVO]] = {
@@ -246,7 +246,7 @@ class AnalysisJobLifecycle:
                 return JobOutcome(AnalysisJobStatusVO.FAILED, "ML_INVALID_REQUEST", message)
             return JobOutcome(AnalysisJobStatusVO.FAILED, "LLM_UNAVAILABLE", message, True)
         problems: list[str] = []
-        failed_blocks = _failed_block_count(result.meta)
+        failed_blocks = failed_block_count(result.meta)
         if failed_blocks:
             problems.append(f"{failed_blocks} блоков не удалось проверить")
         if failed_sources:
@@ -258,14 +258,6 @@ class AnalysisJobLifecycle:
                 _truncate("; ".join(problems)),
             )
         return JobOutcome(AnalysisJobStatusVO.SUCCESS)
-
-
-def _failed_block_count(meta: Mapping[str, Any]) -> int:
-    """meta.errors читается мягко: состав meta не зафиксирован контрактом."""
-    value = meta.get("errors")
-    if isinstance(value, bool) or not isinstance(value, int | float) or value != value:
-        return 0
-    return max(int(value), 0)
 
 
 def _truncate(message: str) -> str | None:

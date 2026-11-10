@@ -2,8 +2,11 @@
 
 Фиксация транзакции — на стороне UoW. Решения по правкам меняются условными
 UPDATE (WHERE status = ...), чтобы параллельные запросы не перезаписывали друг друга.
-Выборки упорядочены по (created_at, id): правки одного анализа вставляются одним
-flush и имеют одинаковое время создания.
+Выборки упорядочены по (created_at, position, id). Правки одного анализа вставляются
+одной транзакцией с одинаковым created_at, и порядок внутри неё задаёт position — номер
+правки в ответе конвейера. created_at стоит первым ради прежнего конвейера: там каждый
+источник пишет свои правки отдельной транзакцией со своей нумерацией, и без него правки
+разных источников перемешались бы. В этом же порядке экспортёры применяют принятые правки.
 """
 
 from __future__ import annotations
@@ -21,6 +24,8 @@ from app.domain.interfaces.repositories import ISuggestionRepository
 from app.domain.value_objects import ReviewDecisions, SuggestionDecision, SuggestionStatusVO
 from app.infrastructure.db.models.enums import SuggestionStatus
 from app.infrastructure.db.models.suggestion import Suggestion
+
+_ORDER = (Suggestion.created_at.asc(), Suggestion.position.asc(), Suggestion.id.asc())
 
 
 def _status_to_orm(vo: SuggestionStatusVO) -> SuggestionStatus:
@@ -53,7 +58,7 @@ class SuggestionRepository(ISuggestionRepository):
         q = select(Suggestion).where(Suggestion.analysis_job_id == analysis_job_id)
         if status is not None:
             q = q.where(Suggestion.status == _status_to_orm(status))
-        q = q.order_by(Suggestion.created_at.asc(), Suggestion.id.asc()).offset(offset)
+        q = q.order_by(*_ORDER).offset(offset)
         if limit is not None:
             q = q.limit(limit)
         result = await self._session.execute(q)
@@ -82,7 +87,7 @@ class SuggestionRepository(ISuggestionRepository):
             await self._session.execute(
                 select(Suggestion, func.count().over().label("total"))
                 .where(*where_clauses)
-                .order_by(Suggestion.created_at.asc(), Suggestion.id.asc())
+                .order_by(*_ORDER)
                 .limit(limit)
                 .offset(offset)
             )
@@ -131,7 +136,7 @@ class SuggestionRepository(ISuggestionRepository):
                 Suggestion.analysis_job_id == analysis_job_id,
                 Suggestion.status == _status_to_orm(status),
             )
-            .order_by(Suggestion.created_at.asc(), Suggestion.id.asc())
+            .order_by(*_ORDER)
         )
         return list(result.scalars().all())
 
@@ -152,7 +157,7 @@ class SuggestionRepository(ISuggestionRepository):
                 Suggestion.analysis_job_id == analysis_job_id,
                 Suggestion.status == _status_to_orm(status),
             )
-            .order_by(Suggestion.created_at.asc(), Suggestion.id.asc())
+            .order_by(*_ORDER)
             .limit(limit)
             .offset(offset)
         )

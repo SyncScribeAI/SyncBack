@@ -220,3 +220,64 @@ async def test_finish_waits_for_row_lock_of_concurrent_writer(
 
     assert await asyncio.wait_for(pending, WAIT_SECONDS) is False
     assert await _status(pg_sessionmaker, scenario.job_id) == "success"
+
+
+class ReversedOrderAnalyzer:
+    """Правки в обратном порядке документа: выдача должна следовать ответу конвейера."""
+
+    async def analyze(self, request: AnalysisRequest) -> AnalysisResult:
+        first, second = request.document.blocks[:2]
+        return AnalysisResult(
+            status=AnalysisStatus.COMPLETED,
+            suggestions=(
+                ProposedChange("modify", second.ref, "Второй абзац", "Второй абзац обновлён"),
+                ProposedChange("delete", first.ref, "документа", None),
+                ProposedChange("modify", first.ref, "Первый", "Начальный"),
+            ),
+            meta={"checked_blocks": 2, "errors": 0, "model": "модель-1"},
+        )
+
+    async def health_check(self) -> bool:
+        return True
+
+
+@pytest.mark.usefixtures("worker_env")
+async def test_order_offsets_and_pipeline_meta_on_postgres(
+    pg_sessionmaker: async_sessionmaker[AsyncSession],
+    scenario: Scenario,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(v2, "_get_analyzer", ReversedOrderAnalyzer)
+
+    await v2.analyze_document(str(scenario.job_id), scenario.source_ids, 0)
+
+    text = DOCUMENT.decode()
+    async with pg_sessionmaker() as session:
+        uow = SqlAlchemyUnitOfWork(session)
+        items = await uow.suggestions.list_by_analysis_job(scenario.job_id)
+        assert [(s.position, s.original_text) for s in items] == [
+            (0, "Второй абзац"),
+            (1, "документа"),
+            (2, "Первый"),
+        ]
+        for item in items:
+            assert item.start_offset is not None and item.end_offset is not None
+            assert text[item.start_offset : item.end_offset] == item.original_text
+        assert [s.block_id for s in items] == ["p-1", "p-0", "p-0"]
+
+        job = await session.get(AnalysisJob, scenario.job_id)
+        assert job is not None
+        assert (job.request_id, job.checked_blocks, job.failed_blocks) == (
+            f"{scenario.job_id}:0",
+            2,
+            0,
+        )
+        assert job.pipeline_meta is not None
+        assert job.pipeline_meta["meta"] == {"checked_blocks": 2, "errors": 0, "model": "модель-1"}
+        # JSONB, а не текст: по ключам meta можно фильтровать в SQL.
+        model = await session.scalar(
+            select(AnalysisJob.pipeline_meta["meta"]["model"].astext).where(
+                AnalysisJob.id == scenario.job_id
+            )
+        )
+        assert model == "модель-1"

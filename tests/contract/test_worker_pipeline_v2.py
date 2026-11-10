@@ -208,7 +208,9 @@ async def test_success_writes_suggestions_with_all_request_sources(
 
     [request] = worker.analyzer.requests
     assert request.request_id == f"{job_id}:0"
-    assert [s.name for s in request.sources] == ["A", "B"]
+    # Источники созданы в одну секунду, а SQLite хранит created_at с точностью до секунды:
+    # порядок между ними задаёт uuid, поэтому сравниваем без порядка.
+    assert sorted(s.name for s in request.sources) == ["A", "B"]
     assert [b.type.value for b in request.document.blocks][:2] == ["heading", "paragraph"]
 
     [suggestion] = await _suggestions(sessionmaker)
@@ -498,3 +500,92 @@ async def test_payloads_are_not_stored_by_default(
     _, _, _, job_id, source_ids = await _start(client, queue, ["A"])
     await v2.analyze_document(job_id, source_ids, 0)
     assert not [key for key in worker.uploads if key.startswith("analysis_runs/")]
+
+
+async def test_suggestions_are_bound_to_blocks_and_keep_pipeline_order(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,  # noqa: F811
+    worker: Worker,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # Конвейер вернул правки не в порядке документа: выдача должна следовать ответу.
+    def payment_then_deadline(request: AnalysisRequest) -> AnalysisResult:
+        return AnalysisResult(
+            status=AnalysisStatus.COMPLETED,
+            suggestions=(
+                ProposedChange(
+                    kind="modify",
+                    block_ref=_block_ref(request, "картой"),
+                    old_text="картой",
+                    new_text="картой или по счёту",
+                ),
+                ProposedChange(
+                    kind="add",
+                    block_ref=_block_ref(request, "10 рабочих"),
+                    old_text=None,
+                    new_text=" Срок можно продлить.",
+                    anchor_text="10 рабочих дней.",
+                ),
+            ),
+            meta={"checked_blocks": 2, "errors": 0, "llm_seconds": 1.5},
+        )
+
+    worker.analyzer.respond = payment_then_deadline
+    headers, project_id, document_id, job_id, source_ids = await _start(client, queue, ["A"])
+
+    await v2.analyze_document(job_id, source_ids, 0)
+
+    editor = await client.get(
+        f"/api/v1/projects/{project_id}/documents/{document_id}/editor", headers=headers
+    )
+    assert editor.status_code == 200, editor.text
+    body = editor.json()
+    plain_text = body["content"]["plain_text"]
+    blocks = {block["ref"]: block for block in body["content"]["blocks"]}
+    items = body["suggestions"]
+    assert [(item["original_text"], item["position"]) for item in items] == [
+        ("картой", 0),
+        ("10 рабочих дней.", 1),
+    ]
+    for item in items:
+        block = blocks[item["block_id"]]
+        assert block["start_offset"] <= item["start_offset"] < item["end_offset"]
+        assert item["end_offset"] <= block["end_offset"]
+        assert plain_text[item["start_offset"] : item["end_offset"]] == item["original_text"]
+
+    job = await client.get(
+        f"/api/v1/projects/{project_id}/documents/{document_id}/analysis-jobs/{job_id}",
+        headers=headers,
+    )
+    assert job.status_code == 200, job.text
+    assert (job.json()["checked_blocks"], job.json()["failed_blocks"]) == (2, 0)
+
+    stored = await _job(sessionmaker, job_id)
+    assert stored.request_id == f"{job_id}:0"
+    assert stored.pipeline_meta == {
+        "contract_version": "2.0",
+        "provider": v2._settings.analysis_provider,
+        "meta": {"checked_blocks": 2, "errors": 0, "llm_seconds": 1.5},
+    }
+
+
+async def test_failed_pipeline_answer_keeps_request_id(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,  # noqa: F811
+    worker: Worker,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    worker.analyzer.respond = lambda request: AnalysisResult(
+        status=AnalysisStatus.FAILED,
+        error=AnalysisError(AnalysisErrorCode.INVALID_REQUEST, "нет блоков"),
+        meta={"blocks": 0},
+    )
+    _, _, _, job_id, source_ids = await _start(client, queue, ["A"])
+
+    await v2.analyze_document(job_id, source_ids, 0)
+
+    job = await _job(sessionmaker, job_id)
+    assert (job.status.value, job.error_code) == ("failed", "ML_INVALID_REQUEST")
+    assert job.request_id == f"{job_id}:0"
+    assert job.pipeline_meta is not None and job.pipeline_meta["meta"] == {"blocks": 0}
+    assert (job.checked_blocks, job.failed_blocks) == (None, None)

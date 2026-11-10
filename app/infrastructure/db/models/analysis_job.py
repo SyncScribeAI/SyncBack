@@ -8,7 +8,7 @@ idempotency_key уникален в пределах документа (uq_anal
 
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import sqlalchemy as sa
 from sqlalchemy import (
@@ -22,7 +22,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.infrastructure.db.base import Base
@@ -77,6 +77,13 @@ class AnalysisJob(Base):
     partial_success: Mapped[bool] = mapped_column(
         sa.Boolean, nullable=False, default=False, server_default="false"
     )
+    # Сводка вызова ML 2.0; у задач legacy_llm поля остаются NULL.
+    # request_id — для поиска запроса в логах harness.
+    request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # {"contract_version", "provider", "meta"}; meta сверх лимита не сохраняется.
+    pipeline_meta: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    checked_blocks: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    failed_blocks: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

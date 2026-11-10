@@ -53,6 +53,9 @@ class SuggestionProtocol(Protocol):
     suggested_text: str | None
     # Текст, которым пользователь заменил suggested_text при принятии.
     edited_text: str | None
+    # Границы original_text в plain_text; None у правок прежнего конвейера.
+    start_offset: int | None
+    end_offset: int | None
     status: SuggestionStatusVO
     decided_by: uuid.UUID | None
     decided_at: datetime | None

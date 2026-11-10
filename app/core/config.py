@@ -141,6 +141,11 @@ class Settings(BaseSettings):
     analysis_source_fetch_concurrency: int = Field(default=4, gt=0)
     analysis_store_payloads: bool = False
     suggestion_low_confidence_threshold: float = Field(default=0.7, ge=0, le=1)
+    # Догоняющие правки для точных повторов фразы. Поиск — O(G·T) по тексту документа,
+    # поэтому число групп и правок на группу ограничено сверху.
+    suggestion_propagate_exact: bool = False
+    suggestion_propagate_max_groups: int = Field(default=50, gt=0, le=500)
+    suggestion_propagate_max_per_group: int = Field(default=50, gt=0, le=500)
 
     @model_validator(mode="after")
     def _validate_analysis(self) -> "Settings":

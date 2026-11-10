@@ -141,10 +141,15 @@ async def list_suggestions(
             f"Допустимые значения: {', '.join(_SUGGESTION_STATUS_FILTER_MAP)}"
         ),
     ),
+    group_key: str | None = Query(
+        default=None,
+        max_length=64,
+        description="Только правки одной группы (SuggestionResponse.group_key)",
+    ),
     project: Project = Depends(get_allowed_project),
     suggestion_service: SuggestionService = Depends(get_suggestion_service),
 ) -> PageSuggestionResponse:
-    """Список правок документа с опциональной фильтрацией по статусу."""
+    """Список правок документа с опциональной фильтрацией по статусу и группе."""
     status_vo: SuggestionStatusVO | None = None
     if status_filter is not None:
         status_vo = _SUGGESTION_STATUS_FILTER_MAP.get(status_filter.lower())
@@ -160,7 +165,7 @@ async def list_suggestions(
     pagination = PaginationParams(limit=limit, offset=offset)
     try:
         suggestions, total = await suggestion_service.list_suggestions_for_document(
-            project.id, document_id, pagination, status_filter=status_vo
+            project.id, document_id, pagination, status_filter=status_vo, group_key=group_key
         )
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

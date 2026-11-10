@@ -1,4 +1,4 @@
--- Схема БД SyncScribe после alembic upgrade head (ревизия 0033).
+-- Схема БД SyncScribe после alembic upgrade head (ревизия 0034).
 -- Получено командой: pg_dump --schema-only --no-owner --no-privileges.
 -- Источник истины — миграции в alembic/versions; файл обновляется вместе с ними.
 
@@ -372,7 +372,10 @@ CREATE TABLE public.suggestions (
     document_id uuid NOT NULL,
     edited_text text,
     "position" integer DEFAULT 0 NOT NULL,
-    CONSTRAINT ck_suggestions_confidence_range CHECK (((confidence_score IS NULL) OR ((confidence_score >= (0)::numeric) AND (confidence_score <= (1)::numeric))))
+    group_key character varying(64),
+    origin character varying(16) DEFAULT 'model'::character varying NOT NULL,
+    CONSTRAINT ck_suggestions_confidence_range CHECK (((confidence_score IS NULL) OR ((confidence_score >= (0)::numeric) AND (confidence_score <= (1)::numeric)))),
+    CONSTRAINT ck_suggestions_origin CHECK (((origin)::text = ANY ((ARRAY['model'::character varying, 'propagated'::character varying])::text[])))
 );
 
 
@@ -657,6 +660,13 @@ CREATE INDEX ix_suggestions_decided_by ON public.suggestions USING btree (decide
 --
 
 CREATE INDEX ix_suggestions_document_status ON public.suggestions USING btree (document_id, status);
+
+
+--
+-- Name: ix_suggestions_job_group; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_suggestions_job_group ON public.suggestions USING btree (analysis_job_id, group_key) WHERE (group_key IS NOT NULL);
 
 
 --

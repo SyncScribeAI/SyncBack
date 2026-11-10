@@ -35,6 +35,7 @@ from app.domain.value_objects import (
     PaginationParams,
     ReviewDecisions,
     SuggestionDecision,
+    SuggestionGroupSummary,
     SuggestionStatusVO,
 )
 
@@ -181,6 +182,7 @@ class SuggestionService:
         document_id: uuid.UUID,
         pagination: PaginationParams,
         status_filter: SuggestionStatusVO | None = None,
+        group_key: str | None = None,
     ) -> tuple[list[SuggestionProtocol], int]:
         """Страница правок текущего анализа документа и их общее число."""
         async with self._uow:
@@ -192,8 +194,19 @@ class SuggestionService:
                 limit=pagination.limit,
                 offset=pagination.offset,
                 status=status_filter,
+                group_key=group_key,
             )
         return list(items), total
+
+    async def list_suggestion_groups(
+        self, project_id: uuid.UUID, document_id: uuid.UUID
+    ) -> list[SuggestionGroupSummary]:
+        """Группы правок одной фразы в текущем анализе документа."""
+        async with self._uow:
+            document = await self._get_document_or_raise(project_id, document_id)
+            if document.current_analysis_job_id is None:
+                return []
+            return await self._uow.suggestions.list_groups(document.current_analysis_job_id)
 
     async def get_suggestion_for_document(
         self,

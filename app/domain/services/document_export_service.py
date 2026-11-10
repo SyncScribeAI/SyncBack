@@ -142,6 +142,8 @@ class DocumentExportService:
                     change_type=s.change_type.value,
                     old_text=s.original_text,
                     new_text=s.edited_text or s.suggested_text,
+                    start_offset=s.start_offset,
+                    end_offset=s.end_offset,
                 )
                 for s in page
             )

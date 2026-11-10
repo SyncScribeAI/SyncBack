@@ -281,3 +281,64 @@ async def test_order_offsets_and_pipeline_meta_on_postgres(
             )
         )
         assert model == "модель-1"
+
+
+class RepeatedPhraseAnalyzer:
+    """Одна и та же правка фразы в двух абзацах — одна группа."""
+
+    async def analyze(self, request: AnalysisRequest) -> AnalysisResult:
+        return AnalysisResult(
+            status=AnalysisStatus.COMPLETED,
+            suggestions=tuple(
+                ProposedChange("modify", block.ref, "документа", "текста")
+                for block in request.document.blocks[:2]
+            ),
+        )
+
+    async def health_check(self) -> bool:
+        return True
+
+
+@pytest.mark.usefixtures("worker_env")
+async def test_suggestion_groups_on_postgres(
+    pg_sessionmaker: async_sessionmaker[AsyncSession],
+    scenario: Scenario,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(v2, "_get_analyzer", RepeatedPhraseAnalyzer)
+
+    await v2.analyze_document(str(scenario.job_id), scenario.source_ids, 0)
+
+    async with pg_sessionmaker() as session:
+        uow = SqlAlchemyUnitOfWork(session)
+        items = await uow.suggestions.list_by_analysis_job(scenario.job_id)
+        assert [s.origin for s in items] == ["model", "model"]
+        (key,) = {s.group_key for s in items}
+        assert key is not None
+        second_id = items[1].id
+        await session.execute(
+            update(Suggestion).where(Suggestion.id == items[0].id).values(status="rejected")
+        )
+        await session.flush()
+
+        groups = await uow.suggestions.list_groups(scenario.job_id)
+        assert [(g.group_key, g.size, g.pending) for g in groups] == [(key, 2, 1)]
+        page, total = await uow.suggestions.list_with_total(
+            scenario.job_id, limit=1, offset=0, group_key=key
+        )
+        assert (len(page), total) == (1, 2)
+        assert await uow.suggestions.list_with_total(
+            scenario.job_id, limit=10, offset=0, group_key="нет-такой"
+        ) == ([], 0)
+
+        index = await session.scalar(
+            select(func.pg_get_indexdef(func.to_regclass("ix_suggestions_job_group")))
+        )
+        assert index is not None and "WHERE (group_key IS NOT NULL)" in index
+        await session.rollback()
+
+    async with pg_sessionmaker() as session:
+        with pytest.raises(Exception, match="ck_suggestions_origin"):
+            await session.execute(
+                update(Suggestion).where(Suggestion.id == second_id).values(origin="manual")
+            )

@@ -36,6 +36,13 @@ class SuggestionStatusVO(StrEnum):
     REJECTED = "rejected"
 
 
+class SuggestionOriginVO(StrEnum):
+    """Кто предложил правку: конвейер или бэкенд по точному повтору фразы."""
+
+    MODEL = "model"
+    PROPAGATED = "propagated"
+
+
 class AnalysisJobStatusVO(StrEnum):
     PENDING = "pending"
     DISPATCHED = "dispatched"  # синхронизировано с enums.AnalysisJobStatus
@@ -137,6 +144,15 @@ class KeysetPage:
     def has_cursor(self) -> bool:
         """Первая страница запрашивается без курсора."""
         return self.before_created_at is not None
+
+
+@dataclass(frozen=True)
+class SuggestionGroupSummary:
+    """Размер группы правок одной фразы и сколько в ней ещё не решено."""
+
+    group_key: str
+    size: int
+    pending: int
 
 
 @dataclass(frozen=True)

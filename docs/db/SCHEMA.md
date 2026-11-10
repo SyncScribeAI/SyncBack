@@ -1,6 +1,6 @@
 # Схема базы данных SyncScribe
 
-Описание соответствует схеме после применения всех миграций Alembic (ревизия `0033`). Данные собраны из каталога PostgreSQL на чистой базе после `alembic upgrade head`. Полный DDL — в [`schema.sql`](schema.sql).
+Описание соответствует схеме после применения всех миграций Alembic (ревизия `0034`). Данные собраны из каталога PostgreSQL на чистой базе после `alembic upgrade head`. Полный DDL — в [`schema.sql`](schema.sql).
 
 Источник истины — миграции в `alembic/versions`. После новой миграции оба файла нужно обновить (см. [раздел в конце](#как-обновить)).
 
@@ -249,15 +249,19 @@ erDiagram
 | `position` | `integer` | нет | `0` | Номер правки в ответе конвейера; порядок выдачи — `(created_at, position, id)` |
 | `document_id` | `uuid` | нет |  | → `documents` (CASCADE). Документ (денормализация для фильтров по документу) |
 | `edited_text` | `text` | да |  | Текст, исправленный пользователем при принятии; при экспорте важнее `suggested_text` |
+| `group_key` | `character varying(64)` | да |  | Ключ группы правок одной фразы (тип, `original_text`, `suggested_text` без учёта регистра, пробелов и «ё/е»); NULL — у правки нет пары. Только v2 |
+| `origin` | `character varying(16)` | нет | `'model'::character varying` | `model` — правка конвейера; `propagated` — догоняющая правка бэкенда по точному повтору фразы |
 
 Ограничения:
 
 - `ck_suggestions_confidence_range`: `CHECK (((confidence_score IS NULL) OR ((confidence_score >= (0)::numeric) AND (confidence_score <= (1)::numeric))))`
+- `ck_suggestions_origin`: `CHECK (((origin)::text = ANY ((ARRAY['model'::character varying, 'propagated'::character varying])::text[])))`
 
 Индексы:
 
 - `ix_suggestions_decided_by` (btree): `(decided_by) WHERE (decided_by IS NOT NULL)`
 - `ix_suggestions_document_status` (btree): `(document_id, status)`
+- `ix_suggestions_job_group` (btree): `(analysis_job_id, group_key) WHERE (group_key IS NOT NULL)`
 - `ix_suggestions_job_order` (btree): `(analysis_job_id, created_at, "position", id)`
 - `ix_suggestions_job_status` (btree): `(analysis_job_id, status)`
 

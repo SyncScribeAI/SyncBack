@@ -164,9 +164,32 @@ def test_offsets_point_into_document_text_like_editor_blocks() -> None:
     mapped = map_result(result, request.document.blocks)
     for draft in mapped.suggestions:
         assert text[draft.start_offset : draft.end_offset] == draft.original_text
-    # Повтор внутри блока — первое вхождение, как у экспортёров.
+    # Одна правка на повторяющуюся фразу — первое вхождение.
     last_block = request.document.blocks[-1]
     assert mapped.suggestions[2].start_offset == last_block.start_offset + len("Срок ")
+
+
+def test_repeated_phrase_in_block_gets_occurrences_in_answer_order() -> None:
+    text = MD + "\nСрок 10 дней, ещё раз 10 дней.\n"
+    request = build_analysis_request(
+        job_id=JOB_ID, attempt=0, document=_document(text), sources=[_source()]
+    )
+    block = request.document.blocks[-1]
+    result = _completed(
+        ProposedChange("modify", block.ref, "10 дней", "5 дней"),
+        ProposedChange("modify", block.ref, "10 дней", "7 дней"),
+        # Третьего вхождения нет: правка легла бы на уже занятое место.
+        ProposedChange("delete", block.ref, "10 дней", None),
+        ProposedChange("add", block.ref, None, "Первое.", anchor_text="Срок"),
+        ProposedChange("add", block.ref, None, "Второе.", anchor_text="Срок"),
+    )
+    mapped = map_result(result, request.document.blocks)
+    starts = [d.start_offset - block.start_offset for d in mapped.suggestions]
+    assert starts == [len("Срок "), len("Срок 10 дней, ещё раз "), 0, 0]
+    assert [d.suggested_text for d in mapped.suggestions[:2]] == ["5 дней", "7 дней"]
+    assert mapped.dropped == {"old_text_occurrences_exhausted": 1}
+    for draft in mapped.suggestions:
+        assert text[draft.start_offset : draft.end_offset] == draft.original_text
 
 
 def test_section_ref_matches_editor_sections() -> None:

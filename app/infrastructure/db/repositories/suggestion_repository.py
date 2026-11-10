@@ -21,7 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import SuggestionAlreadyDecidedError
 from app.domain.interfaces.repositories import ISuggestionRepository
-from app.domain.value_objects import ReviewDecisions, SuggestionDecision, SuggestionStatusVO
+from app.domain.value_objects import (
+    ReviewDecisions,
+    SuggestionDecision,
+    SuggestionGroupSummary,
+    SuggestionStatusVO,
+)
 from app.infrastructure.db.models.enums import SuggestionStatus
 from app.infrastructure.db.models.suggestion import Suggestion
 
@@ -71,6 +76,7 @@ class SuggestionRepository(ISuggestionRepository):
         limit: int,
         offset: int,
         status: SuggestionStatusVO | None = None,
+        group_key: str | None = None,
     ) -> tuple[list[Suggestion], int]:
         """Страница и total одним SELECT с оконной функцией.
 
@@ -82,6 +88,8 @@ class SuggestionRepository(ISuggestionRepository):
         where_clauses = [Suggestion.analysis_job_id == analysis_job_id]
         if status is not None:
             where_clauses.append(Suggestion.status == _status_to_orm(status))
+        if group_key is not None:
+            where_clauses.append(Suggestion.group_key == group_key)
 
         rows = (
             await self._session.execute(
@@ -101,6 +109,24 @@ class SuggestionRepository(ISuggestionRepository):
         items = [r[0] for r in rows]
         total = rows[0][1]
         return items, total
+
+    async def list_groups(self, analysis_job_id: uuid.UUID) -> list[SuggestionGroupSummary]:
+        pending = func.count().filter(Suggestion.status == SuggestionStatus.PENDING)
+        rows = await self._session.execute(
+            select(Suggestion.group_key, func.count(), pending)
+            .where(
+                Suggestion.analysis_job_id == analysis_job_id,
+                Suggestion.group_key.is_not(None),
+            )
+            .group_by(Suggestion.group_key)
+            .order_by(Suggestion.group_key)
+        )
+        return [
+            SuggestionGroupSummary(group_key=key, size=size, pending=pending_count)
+            for key, size, pending_count in rows.tuples()
+            # NULL отсекает WHERE; условие сужает тип ключа до str.
+            if key is not None
+        ]
 
     async def count_by_analysis_job(self, analysis_job_id: uuid.UUID) -> int:
         result = await self._session.execute(

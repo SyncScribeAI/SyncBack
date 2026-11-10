@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class SuggestionSourceResponse(BaseModel):
@@ -42,11 +42,20 @@ class SuggestionResponse(BaseModel):
         default_factory=list,
         description="Источники истины, на основании которых создана правка",
     )
-    block_id: str | None = None
-    start_offset: int | None = Field(
-        default=None, description="Начало фрагмента в тексте документа, если известно"
+    block_id: str | None = Field(
+        default=None, description="ref блока документа (как в editor.blocks), если известен"
     )
-    end_offset: int | None = None
+    start_offset: int | None = Field(
+        default=None,
+        description=(
+            "Начало original_text в plain_text документа, в символах Unicode (как смещения"
+            " блоков редактора); None — правка не привязана к блоку"
+        ),
+    )
+    end_offset: int | None = Field(default=None, description="Конец original_text, не включая")
+    position: int = Field(
+        default=0, description="Номер правки в ответе конвейера внутри одного анализа"
+    )
     status: Literal["pending", "accepted", "rejected"]
     # None — решение ещё не принято или сброшено.
     decided_by: uuid.UUID | None = None
@@ -54,6 +63,12 @@ class SuggestionResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @field_validator("position", mode="before")
+    @classmethod
+    def _position_before_insert(cls, value: object) -> object:
+        # default и server_default срабатывают только при INSERT: у правки до записи в БД здесь None.
+        return 0 if value is None else value
 
 
 # ---------------------------------------------------------------------------

@@ -42,8 +42,8 @@ class Suggestion(Base):
         ),
         Index("ix_suggestions_job_status", "analysis_job_id", "status"),
         Index("ix_suggestions_document_status", "document_id", "status"),
-        # Keyset-пагинация по задаче: ORDER BY created_at, id.
-        Index("ix_suggestions_job_created_at_id", "analysis_job_id", "created_at", "id"),
+        # Порядок выдачи правок задачи: ORDER BY created_at, position, id.
+        Index("ix_suggestions_job_order", "analysis_job_id", "created_at", "position", "id"),
         Index(
             "ix_suggestions_decided_by",
             "decided_by",
@@ -69,8 +69,13 @@ class Suggestion(Base):
     # Ссылка на document_blocks.block_ref. Внешний ключ не объявлен: block_ref уникален
     # только в паре с document_id, поэтому ссылка должна быть составной.
     block_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Границы original_text в plain_text документа; NULL — правка не привязана к блоку
+    # (прежний конвейер legacy_llm).
     start_offset: Mapped[int | None] = mapped_column(Integer, nullable=True)
     end_offset: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Номер правки в ответе конвейера. Правки одного анализа вставляются одной транзакцией
+    # с одинаковым created_at, и без position их порядок задавал бы случайный uuid.
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     change_type: Mapped[ChangeType] = mapped_column(
         sa.Enum(ChangeType, name="change_type", values_callable=_values),
         nullable=False,

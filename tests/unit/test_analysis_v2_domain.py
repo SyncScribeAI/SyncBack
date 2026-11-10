@@ -84,6 +84,8 @@ def test_request_carries_block_texts_and_ids() -> None:
         ("c-4", DocumentBlockType.CODE, "```\nprice = 10\n```", False),
     ]
     assert [s.name for s in request.sources] == ["Решения"]
+    parsed = MarkdownParser().parse(MD.encode()).blocks
+    assert [b.start_offset for b in request.document.blocks] == [b.start_offset for b in parsed]
 
 
 def test_duplicate_block_ref_is_our_error_not_harness_one() -> None:
@@ -145,6 +147,26 @@ def test_suggestions_get_section_position_and_anchor() -> None:
     ]
     assert [d.confidence_score for d in mapped.suggestions] == [0.95, 0.95, None]
     assert mapped.dropped == {}
+
+
+def test_offsets_point_into_document_text_like_editor_blocks() -> None:
+    # «10» есть и в p-2, и в коде c-4: смещение ищется в своём блоке, а не по документу.
+    text = MD + "\nСрок 10 дней, ещё раз 10 дней.\n"
+    request = build_analysis_request(
+        job_id=JOB_ID, attempt=0, document=_document(text), sources=[_source()]
+    )
+    last = request.document.blocks[-1].ref
+    result = _completed(
+        ProposedChange("modify", "p-2", "10 дней", "5 дней"),
+        ProposedChange("add", "p-2", None, "Оплата по счёту.", anchor_text="Оплата картой."),
+        ProposedChange("delete", last, "10 дней", None),
+    )
+    mapped = map_result(result, request.document.blocks)
+    for draft in mapped.suggestions:
+        assert text[draft.start_offset : draft.end_offset] == draft.original_text
+    # Повтор внутри блока — первое вхождение, как у экспортёров.
+    last_block = request.document.blocks[-1]
+    assert mapped.suggestions[2].start_offset == last_block.start_offset + len("Срок ")
 
 
 def test_section_ref_matches_editor_sections() -> None:

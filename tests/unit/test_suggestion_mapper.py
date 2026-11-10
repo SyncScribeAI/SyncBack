@@ -260,3 +260,17 @@ def test_inferred_anchors_are_counted_in_log(caplog: pytest.LogCaptureFixture) -
         "Для 2 добавлений якорь выбран автоматически" in record.getMessage()
         for record in caplog.records
     )
+
+
+def test_position_is_index_in_model_answer_including_dropped_items() -> None:
+    result = _map(
+        _item("modify", "Оплата картой.", "Оплата по счёту."),
+        _item("modify", "нет в документе", "x"),
+        _item("modify", "10 дней", "5 дней"),
+    )
+    assert [(s.original_text, s.position) for s in result] == [
+        ("Оплата картой.", 0),
+        ("10 дней", 2),
+    ]
+    # Прежний конвейер работает с текстом без блоков: привязки к блоку нет.
+    assert {(s.block_id, s.start_offset, s.end_offset) for s in result} == {(None, None, None)}

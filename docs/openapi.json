@@ -2901,6 +2901,30 @@
             "type": "boolean",
             "title": "Partial Success",
             "default": false
+          },
+          "checked_blocks": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checked Blocks",
+            "description": "Сколько блоков проверил ML-конвейер; None — неизвестно"
+          },
+          "failed_blocks": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failed Blocks",
+            "description": "Сколько блоков конвейер не смог проверить; None — неизвестно"
           }
         },
         "type": "object",
@@ -3333,6 +3357,19 @@
         "title": "DashboardResponse",
         "description": "Агрегаты + sparkline-тренды экрана «Рабочее пространство».\n\nТекущее состояние (виджеты):\n  total_documents         — документов всего\n  awaiting_approval_count — ожидают проверки\n  relevance_percent       — актуальность базы (ready / total × 100)\n\nSparkline-тренды за 7 дней ([дата, значение]):\n  total_trend     — общее кол-во документов на конец каждого дня\n  awaiting_trend  — кол-во документов awaiting_approval в моменте\n  relevance_trend — актуальность базы (%)\n\nЗначения берутся из dashboard_snapshots; дни без снэпшота\nзаполняются текущим значением."
       },
+      "DocumentBlockType": {
+        "type": "string",
+        "enum": [
+          "heading",
+          "paragraph",
+          "list_item",
+          "code",
+          "table",
+          "other"
+        ],
+        "title": "DocumentBlockType",
+        "description": "Тип блока документа; значения совпадают с block_type_enum в БД."
+      },
       "DocumentContentResponse": {
         "properties": {
           "plain_text": {
@@ -3683,6 +3720,50 @@
         ],
         "title": "EditorAggregateResponse"
       },
+      "EditorBlockResponse": {
+        "properties": {
+          "ref": {
+            "type": "string",
+            "title": "Ref"
+          },
+          "type": {
+            "$ref": "#/components/schemas/DocumentBlockType"
+          },
+          "start_offset": {
+            "type": "integer",
+            "title": "Start Offset"
+          },
+          "end_offset": {
+            "type": "integer",
+            "title": "End Offset"
+          },
+          "editable": {
+            "type": "boolean",
+            "title": "Editable"
+          },
+          "heading_level": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Heading Level"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ref",
+          "type",
+          "start_offset",
+          "end_offset",
+          "editable"
+        ],
+        "title": "EditorBlockResponse",
+        "description": "Блок документа без текста: текст фронт берёт из plain_text по смещениям,\nчтобы ответ не дублировал документ целиком."
+      },
       "EditorContent": {
         "properties": {
           "plain_text": {
@@ -3695,6 +3776,14 @@
             },
             "type": "array",
             "title": "Sections",
+            "default": []
+          },
+          "blocks": {
+            "items": {
+              "$ref": "#/components/schemas/EditorBlockResponse"
+            },
+            "type": "array",
+            "title": "Blocks",
             "default": []
           }
         },
@@ -4930,7 +5019,8 @@
                 "type": "null"
               }
             ],
-            "title": "Block Id"
+            "title": "Block Id",
+            "description": "ref блока документа (как в editor.blocks), если известен"
           },
           "start_offset": {
             "anyOf": [
@@ -4942,7 +5032,7 @@
               }
             ],
             "title": "Start Offset",
-            "description": "Начало фрагмента в тексте документа, если известно"
+            "description": "Начало original_text в plain_text документа, в символах Unicode (как смещения блоков редактора); None — правка не привязана к блоку"
           },
           "end_offset": {
             "anyOf": [
@@ -4953,7 +5043,14 @@
                 "type": "null"
               }
             ],
-            "title": "End Offset"
+            "title": "End Offset",
+            "description": "Конец original_text, не включая"
+          },
+          "position": {
+            "type": "integer",
+            "title": "Position",
+            "description": "Номер правки в ответе конвейера внутри одного анализа",
+            "default": 0
           },
           "status": {
             "type": "string",

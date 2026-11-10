@@ -1,4 +1,4 @@
--- Схема БД SyncScribe после alembic upgrade head (ревизия 0032).
+-- Схема БД SyncScribe после alembic upgrade head (ревизия 0033).
 -- Получено командой: pg_dump --schema-only --no-owner --no-privileges.
 -- Источник истины — миграции в alembic/versions; файл обновляется вместе с ними.
 
@@ -206,7 +206,11 @@ CREATE TABLE public.analysis_jobs (
     started_at timestamp with time zone,
     finished_at timestamp with time zone,
     idempotency_key character varying(128),
-    partial_success boolean DEFAULT false NOT NULL
+    partial_success boolean DEFAULT false NOT NULL,
+    request_id character varying(128),
+    pipeline_meta jsonb,
+    checked_blocks integer,
+    failed_blocks integer
 );
 
 
@@ -367,6 +371,7 @@ CREATE TABLE public.suggestions (
     end_offset integer,
     document_id uuid NOT NULL,
     edited_text text,
+    "position" integer DEFAULT 0 NOT NULL,
     CONSTRAINT ck_suggestions_confidence_range CHECK (((confidence_score IS NULL) OR ((confidence_score >= (0)::numeric) AND (confidence_score <= (1)::numeric))))
 );
 
@@ -655,10 +660,10 @@ CREATE INDEX ix_suggestions_document_status ON public.suggestions USING btree (d
 
 
 --
--- Name: ix_suggestions_job_created_at_id; Type: INDEX; Schema: public; Owner: -
+-- Name: ix_suggestions_job_order; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX ix_suggestions_job_created_at_id ON public.suggestions USING btree (analysis_job_id, created_at, id);
+CREATE INDEX ix_suggestions_job_order ON public.suggestions USING btree (analysis_job_id, created_at, "position", id);
 
 
 --

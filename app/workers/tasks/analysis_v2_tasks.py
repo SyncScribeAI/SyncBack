@@ -13,6 +13,10 @@
 пользователем во время ожидания конвейера ничего не запишут. Лишний вызов конвейера при
 повторной доставке возможен, лишних правок — нет.
 
+Если конвейер ответил, сводка вызова (request_id, meta, счётчики блоков) пишется в задачу
+той же транзакцией, что и результат, — в том числе при отказе: по request_id отказ ищут в
+логах harness.
+
 Повторы. Таймаут адаптера и временный сбой конвейера (pipeline_error) повторяются до
 ANALYSIS_RETRY_LIMIT раз с экспоненциальной паузой; номер попытки передаётся в kwargs и
 входит в request_id. Ошибка нашего запроса (invalid_request), некорректный ответ и
@@ -56,13 +60,14 @@ from app.domain.interfaces.document_analyzer import (
 from app.domain.interfaces.file_storage import UploadContent
 from app.domain.interfaces.source_connector import SourceRef
 from app.domain.lifecycle import AnalysisJobLifecycle
+from app.domain.pipeline_run import PipelineRunSummary, summarize_run
 from app.domain.services.analysis_request_builder import DocumentInput, build_analysis_request
 from app.domain.services.analysis_result_mapper import SuggestionDraft, map_result
 from app.domain.source_text import ensure_source_fits
 from app.domain.value_objects import AnalysisJobStatusVO
 from app.infrastructure.db.session import isolated_uow
 from app.infrastructure.ml_pipeline.factory import analysis_limits, get_document_analyzer
-from app.infrastructure.ml_pipeline.schemas import encode_request
+from app.infrastructure.ml_pipeline.schemas import CONTRACT_VERSION, encode_request
 from app.workers.celery_app import celery_app
 from app.workers.pipeline.suggestion_drafts import to_suggestions
 from app.workers.tasks.job_completion import complete_job
@@ -103,12 +108,16 @@ class RetryLater:
 
 
 class _JobFailed(Exception):
-    """Терминальная ошибка шага: задача завершается failed с этим кодом."""
+    """Терминальная ошибка шага: задача завершается failed с этим кодом.
 
-    def __init__(self, code: str, message: str) -> None:
+    run — сводка вызова ML, если ответ был: request_id нужен и для разбора отказа.
+    """
+
+    def __init__(self, code: str, message: str, run: PipelineRunSummary | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.run = run
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,7 +154,9 @@ async def analyze_document(
             "Анализ v2 завершён ошибкой",
             extra={"job_id": job_id, "attempt": attempt, "error_code": failure.code},
         )
-        await finish(job_uuid, AnalysisJobStatusVO.FAILED, failure.code, failure.message)
+        await finish(
+            job_uuid, AnalysisJobStatusVO.FAILED, failure.code, failure.message, run=failure.run
+        )
         return None
 
 
@@ -173,12 +184,13 @@ async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
     except LLMInvalidResponseError as exc:
         raise _JobFailed("LLM_INVALID_RESPONSE", str(exc)) from exc
     await _store_payload(job.id, attempt, "response", lambda: pydantic_core.to_json(result))
+    run = _summarize(job.id, request, result)
 
     outcome = AnalysisJobLifecycle.outcome_for(result, fetched.failed)
     if outcome.retryable:
-        return await _retry_or_fail(job.id, attempt, outcome.error_message or "")
+        return await _retry_or_fail(job.id, attempt, outcome.error_message or "", run)
     if outcome.status is AnalysisJobStatusVO.FAILED:
-        raise _JobFailed(outcome.error_code or "LLM_UNAVAILABLE", outcome.error_message or "")
+        raise _JobFailed(outcome.error_code or "LLM_UNAVAILABLE", outcome.error_message or "", run)
 
     drafts = _map(job.id, attempt, result, request)
     await finish(
@@ -188,6 +200,7 @@ async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
         outcome.error_message,
         drafts=drafts,
         source_ids=fetched.ids,
+        run=run,
     )
     return None
 
@@ -325,7 +338,26 @@ def _map(
     return mapped.suggestions
 
 
-async def _retry_or_fail(job_id: uuid.UUID, attempt: int, message: str) -> RetryLater | None:
+def _summarize(
+    job_id: uuid.UUID, request: AnalysisRequest, result: AnalysisResult
+) -> PipelineRunSummary:
+    run = summarize_run(
+        result,
+        request_id=request.request_id,
+        contract_version=CONTRACT_VERSION,
+        provider=_settings.analysis_provider,
+    )
+    if run.meta_dropped:
+        logger.warning(
+            "Анализ v2: meta конвейера слишком большая и не сохранена",
+            extra={"job_id": str(job_id), "request_id": run.request_id},
+        )
+    return run
+
+
+async def _retry_or_fail(
+    job_id: uuid.UUID, attempt: int, message: str, run: PipelineRunSummary | None = None
+) -> RetryLater | None:
     if attempt < _settings.analysis_retry_limit:
         countdown = _RETRY_BACKOFF_SECONDS * (2**attempt)
         logger.info(
@@ -333,7 +365,7 @@ async def _retry_or_fail(job_id: uuid.UUID, attempt: int, message: str) -> Retry
             extra={"job_id": str(job_id), "attempt": attempt, "countdown": countdown},
         )
         return RetryLater(countdown)
-    await finish(job_id, AnalysisJobStatusVO.FAILED, "LLM_UNAVAILABLE", message or None)
+    await finish(job_id, AnalysisJobStatusVO.FAILED, "LLM_UNAVAILABLE", message or None, run=run)
     return None
 
 
@@ -345,6 +377,7 @@ async def finish(
     *,
     drafts: Sequence[SuggestionDraft] = (),
     source_ids: Sequence[uuid.UUID] = (),
+    run: PipelineRunSummary | None = None,
 ) -> bool:
     """Записать результат одной транзакцией. False — задача уже не активна, ничего не записано."""
     async with uow_factory() as uow:
@@ -358,6 +391,8 @@ async def finish(
         document = await uow.documents.get_by_id(job.document_id)
         if document is None:
             return False
+        if run is not None:
+            await uow.jobs.record_pipeline_run(job, run)
         if drafts:
             sources = await uow.sources.get_many_by_ids(list(source_ids))
             await uow.suggestions.bulk_create(

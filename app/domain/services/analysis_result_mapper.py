@@ -13,6 +13,10 @@
 section_ref — название ближайшего предшествующего заголовка или «Без раздела»; position —
 порядковый номер среди сохранённых правок, в порядке ответа конвейера.
 
+start_offset/end_offset — границы original_text в plain_text документа, в символах Python
+(как у блоков редактора). Если фрагмент встречается в блоке несколько раз, берётся первое
+вхождение: так же его ищут экспортёры внутри блока.
+
 Атрибуции правки к источнику в контракте нет, поэтому источники правки задача анализа
 заполняет всеми источниками, ушедшими в запрос.
 
@@ -49,6 +53,8 @@ class SuggestionDraft:
     rationale: str | None
     confidence_score: float | None
     position: int
+    start_offset: int
+    end_offset: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,14 +149,17 @@ def _to_suggestion(
             return "add_without_anchor"
         if not (new_text or "").strip():
             return "add_without_text"
-        if original not in context.block.text:
+        found_at = context.block.text.find(original)
+        if found_at < 0:
             return "anchor_not_in_block"
     else:
         original = change.old_text or ""
         if not original.strip():
             return "old_text_missing"
-        if original not in context.block.text:
+        found_at = context.block.text.find(original)
+        if found_at < 0:
             return "old_text_not_in_block"
+    start = context.block.start_offset + found_at
     return SuggestionDraft(
         block_ref=change.block_ref,
         section_ref=context.section_ref,
@@ -160,6 +169,8 @@ def _to_suggestion(
         rationale=change.rationale,
         confidence_score=_confidence(change.confidence),
         position=position,
+        start_offset=start,
+        end_offset=start + len(original),
     )
 
 

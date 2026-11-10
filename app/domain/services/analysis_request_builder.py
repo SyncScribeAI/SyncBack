@@ -87,6 +87,7 @@ def _block_payloads(document: DocumentInput, limits: AnalysisLimits) -> tuple[Bl
                 type=block.type,
                 text=block.text_in(document.plain_text),
                 editable=block.editable,
+                start_offset=block.start_offset,
             )
         )
         if limits.max_blocks is not None and len(payloads) > limits.max_blocks:

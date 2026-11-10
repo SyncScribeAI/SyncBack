@@ -1,6 +1,6 @@
 # Схема базы данных SyncScribe
 
-Описание соответствует схеме после применения всех миграций Alembic (ревизия `0032`). Данные собраны из каталога PostgreSQL на чистой базе после `alembic upgrade head`. Полный DDL — в [`schema.sql`](schema.sql).
+Описание соответствует схеме после применения всех миграций Alembic (ревизия `0033`). Данные собраны из каталога PostgreSQL на чистой базе после `alembic upgrade head`. Полный DDL — в [`schema.sql`](schema.sql).
 
 Источник истины — миграции в `alembic/versions`. После новой миграции оба файла нужно обновить (см. [раздел в конце](#как-обновить)).
 
@@ -178,12 +178,16 @@ erDiagram
 | `celery_task_id` | `character varying(255)` | да |  | Идентификатор задачи в очереди |
 | `error_code` | `character varying(100)` | да |  | Код ошибки (`LLM_UNAVAILABLE`, `PARTIAL_FAILURE` и др.) |
 | `error_message` | `text` | да |  | Текст ошибки или сводка ошибок источников |
-| `retry_count` | `integer` | нет | `0` | Отдаётся в API; приложение его не увеличивает, повторы учитываются в задачах воркера |
+| `retry_count` | `integer` | нет | `0` | Номер попытки задачи анализа v2; прежний конвейер его не увеличивает |
 | `created_at` | `timestamp with time zone` | нет | `now()` |  |
 | `started_at` | `timestamp with time zone` | да |  |  |
 | `finished_at` | `timestamp with time zone` | да |  |  |
 | `idempotency_key` | `character varying(128)` | да |  | Значение заголовка `Idempotency-Key` запуска |
 | `partial_success` | `boolean` | нет | `false` | Часть источников обработана с ошибкой |
+| `request_id` | `character varying(128)` | да |  | request_id запроса к ML 2.0 (`<job_id>:<попытка>`) — для поиска в логах harness |
+| `pipeline_meta` | `jsonb` | да |  | `{"contract_version", "provider", "meta"}`; `meta` больше 16 КиБ или с NaN — `null` |
+| `checked_blocks` | `integer` | да |  | Сколько блоков проверил конвейер (`meta.checked_blocks`) |
+| `failed_blocks` | `integer` | да |  | Сколько блоков конвейер не смог проверить (`meta.errors`) |
 
 Ограничения:
 
@@ -239,9 +243,10 @@ erDiagram
 | `decided_by` | `uuid` | да |  | → `users` (SET NULL). Кто принял решение |
 | `decided_at` | `timestamp with time zone` | да |  | Когда принято решение |
 | `created_at` | `timestamp with time zone` | нет | `now()` |  |
-| `block_id` | `character varying(255)` | да |  | Зарезервировано, приложение не заполняет |
-| `start_offset` | `integer` | да |  | Зарезервировано, приложение не заполняет |
-| `end_offset` | `integer` | да |  | Зарезервировано, приложение не заполняет |
+| `block_id` | `character varying(255)` | да |  | ref блока документа; заполняется задачей анализа v2 |
+| `start_offset` | `integer` | да |  | Начало `original_text` в plain_text документа (символы Unicode); только v2 |
+| `end_offset` | `integer` | да |  | Конец `original_text`, не включая; только v2 |
+| `position` | `integer` | нет | `0` | Номер правки в ответе конвейера; порядок выдачи — `(created_at, position, id)` |
 | `document_id` | `uuid` | нет |  | → `documents` (CASCADE). Документ (денормализация для фильтров по документу) |
 | `edited_text` | `text` | да |  | Текст, исправленный пользователем при принятии; при экспорте важнее `suggested_text` |
 
@@ -253,7 +258,7 @@ erDiagram
 
 - `ix_suggestions_decided_by` (btree): `(decided_by) WHERE (decided_by IS NOT NULL)`
 - `ix_suggestions_document_status` (btree): `(document_id, status)`
-- `ix_suggestions_job_created_at_id` (btree): `(analysis_job_id, created_at, id)`
+- `ix_suggestions_job_order` (btree): `(analysis_job_id, created_at, "position", id)`
 - `ix_suggestions_job_status` (btree): `(analysis_job_id, status)`
 
 ### audit_logs

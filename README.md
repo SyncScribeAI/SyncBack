@@ -132,15 +132,23 @@ LLM_CA_BUNDLE=/srv/app/certs/russian_trusted_root_ca.pem
 
 ```env
 ANALYSIS_PROVIDER=ml_http
-ML_ENDPOINT=http://ml-pipeline:8080/v2/analyze
-ML_HTTP_MODE=async
+ML_ENDPOINT=http://ml:8000/v1/analyze
+ML_HEALTH_URL=http://ml:8000/health
+ML_HTTP_MODE=sync
+ML_API_KEY=<общий ключ>
 ```
+
+Этот пример подключает конвейер [syncscribe-ml](https://github.com/rishotkaB/syncscribe-ml) из сервиса `ml` в `docker-compose.yml`. Сервис поднимается только с профилем: `docker compose --profile ml up`. Образ собирается в их репозитории (`docker build -t syncscribe-ml .`); имя образа задаёт `ML_IMAGE`. Ключ `ML_API_KEY` сервис получает как `SYNCSCRIBE_ML_API_KEY`, число слотов — из `ANALYSIS_V2_CONCURRENCY`. LLM конвейера настраивается переменными `ML_LLM_PROVIDER`, `ML_LLM_MODEL`, `ML_OLLAMA_HOST`, `ML_LLM_BASE_URL`, `ML_LLM_API_KEY` и `ML_EMBED_BACKEND`. Наши `LLM_*` в контейнер не передаются: у конвейера переменные с теми же именами, но другим смыслом.
+
+Проверить подключение можно запросом `GET /api/v1/system/analysis-health` (только для роли `admin`). Ответ `{status, provider, contract_version, healthy, queue: {name, consumers}}`. `healthy` — ответ `ML_HEALTH_URL` (при `legacy_llm` — проверка `LLM_*`), а `null` — проверить нечем: адрес не задан или `ml_plugin`, который установлен только в образе воркера. `queue.consumers` — сколько воркеров слушают очередь анализа, `null` — брокер не ответил. `status` равен `down`, если конвейер недоступен или очередь никто не слушает, и `unknown`, если что-то проверить не удалось. Прежний `GET /system/llm-health` оставлен без изменений и помечен устаревшим. `GET /system/capabilities` отдаёт `analysis.contract_version`: `"2.0"` для анализа по контракту и `null` для `legacy_llm`.
+
+Каждый вызов конвейера пишет в лог одну запись «Анализ v2: вызов конвейера». В ней `job_id`, `request_id` (по нему запись сопоставляется с логами конвейера), `attempt`, `provider`, `outcome` (`completed`, `failed`, `timeout`, `invalid_response`) и `duration_ms`. Там же счётчики: `blocks`, `sources`, `suggestions`, `flags`, `checked_blocks`, `failed_blocks`. Отброшенные правки логируются отдельно, по причинам и итогом `dropped_total`. Тексты документа и правок в логи не попадают.
 
 `ML_WAIT_SECONDS` должен быть меньше `ANALYSIS_TASK_TIME_LIMIT_SECONDS`: запас нужен на загрузку источников и запись результата. Лимиты запроса `ANALYSIS_MAX_*` проверяются до вызова конвейера; превышение — ошибка `LLM_INPUT_TOO_LARGE`.
 
 При `ANALYSIS_PROVIDER` ≠ `legacy_llm` анализ выполняет одна задача Celery `analyze_document_for_job` на документ: все источники уходят в один запрос, правки и статус записываются одной транзакцией. Повторная доставка задачи или отмена во время ожидания конвейера не создают лишних правок. Таймаут и временный сбой конвейера повторяются до `ANALYSIS_RETRY_LIMIT` раз (не больше 6) с паузой 30·2ⁿ с; `ANALYSIS_TASK_TIME_LIMIT_SECONDS` — не больше 3000, чтобы задача укладывалась в visibility timeout брокера Redis. Недоступный источник делает результат частичным (`partial_success`), недоступность всех — ошибкой `SOURCES_UNAVAILABLE`. При `ANALYSIS_STORE_PAYLOADS=true` запрос и разобранный ответ сохраняются в хранилище по ключам `analysis_runs/{job_id}/{attempt}.request.json` и `….response.json`.
 
-Задача v2 идёт в отдельную очередь Celery `ANALYSIS_V2_QUEUE` (по умолчанию `analysis_v2`), её слушает сервис `worker-analysis` с `ANALYSIS_V2_CONCURRENCY` процессами (по умолчанию 1). Остальные задачи остаются в общей очереди `celery` у сервиса `worker`. Конвейер выдерживает ограниченное число одновременных прогонов: если отправить больше, лишние получат `429` и после повторов упадут с `LLM_UNAVAILABLE`. Поэтому `ANALYSIS_V2_CONCURRENCY` (в сумме по всем репликам `worker-analysis`) держите не больше числа слотов конвейера; остальные документы ждут в очереди брокера в статусе `dispatched`, лимиты задачи на это ожидание не распространяются. Если очередь никто не слушает, задачи v2 не начнутся. Для разработки с одним воркером — `ANALYSIS_V2_QUEUE=celery`.
+Задача v2 идёт в отдельную очередь Celery `ANALYSIS_V2_QUEUE` (по умолчанию `analysis_v2`), её слушает сервис `worker-analysis` с `ANALYSIS_V2_CONCURRENCY` процессами (по умолчанию 1). Остальные задачи остаются в общей очереди `celery` у сервиса `worker`. Конвейер выдерживает ограниченное число одновременных прогонов: если отправить больше, лишние получат `429` и после повторов упадут с `LLM_UNAVAILABLE`. Поэтому `ANALYSIS_V2_CONCURRENCY` (в сумме по всем репликам `worker-analysis`) держите не больше числа слотов конвейера; остальные документы ждут в очереди брокера в статусе `dispatched`, лимиты задачи на это ожидание не распространяются. `worker-analysis` поднимается вместе с остальными сервисами при `docker compose up`. При обновлении с версии без него выполните `docker compose up -d --build`: compose создаст новый сервис и перезапустит `worker` с `-Q celery`. Задачи v2, поставленные до обновления в очередь `celery`, выполнит `worker`. Если `worker-analysis` остановлен, задачи v2 не начнутся, а `GET /system/analysis-health` покажет `down` и `consumers: 0`.
 
 Каждая правка v2 привязана к блоку документа: `block_id` — ref блока из `GET /editor` (`content.blocks`), `start_offset`/`end_offset` — границы `original_text` в `content.plain_text` в символах Unicode. Правки выдаются в порядке ответа конвейера (`position`). В задаче анализа сохраняются `request_id` запроса к конвейеру и сводка его `meta`; `checked_blocks` и `failed_blocks` отдаются в `GET …/{d}/analysis-jobs/{j}`.
 
@@ -383,7 +391,7 @@ app/
 | Редактор | `GET …/{d}/editor`, `POST …/{d}/editor/reset` |
 | Главная | `GET /dashboard`, `GET /documents/attention`, `GET /documents/recent` |
 | События | `GET /events/documents` — SSE со сменой статусов документов |
-| Система | `GET /system/capabilities` (форматы, лимиты, правила для клиента), `GET /system/llm-health` (только `admin`), `GET /health` |
+| Система | `GET /system/capabilities` (форматы, лимиты, правила для клиента), `GET /system/analysis-health` (готовность анализа, только `admin`), `GET /system/llm-health` (устарел, только `admin`), `GET /health` |
 
 Соглашения:
 

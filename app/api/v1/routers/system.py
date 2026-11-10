@@ -1,34 +1,78 @@
 """Служебные эндпоинты диагностики окружения и возможностей системы."""
 
+import asyncio
+from collections.abc import Awaitable, Callable
+
 from fastapi import APIRouter, Depends
 
 from app.api.deps import require_admin
 from app.api.schemas.system import (
     AnalysisCapabilities,
+    AnalysisHealthResponse,
+    AnalysisQueueHealth,
     CapabilitiesResponse,
     ExportCapabilities,
     ReviewCapabilities,
     UploadCapabilities,
 )
 from app.core.config import Settings, get_settings
-from app.core.dependencies import get_llm_client_instance
+from app.core.dependencies import (
+    get_analysis_queue_instance,
+    get_llm_client_instance,
+    get_pipeline_health_check,
+)
+from app.domain.analysis_health import AnalysisHealth
+from app.domain.interfaces.analysis_queue import AnalysisQueue
 from app.domain.interfaces.llm_client import LLMClient
 from app.domain.services.document_service import FORMAT_BY_EXTENSION
 from app.domain.value_objects import DocumentStatusVO
 from app.infrastructure.db.models.user import User
+from app.infrastructure.ml_pipeline.factory import contract_version
 
 router = APIRouter(prefix="/system", tags=["system"])
 
 
-@router.get("/llm-health")
+@router.get("/llm-health", deprecated=True)
 async def llm_health(
     current_user: User = Depends(require_admin),
     llm_client: LLMClient = Depends(get_llm_client_instance),
     settings: Settings = Depends(get_settings),
 ) -> dict:
-    """Диагностика LLM-провайдера: только для администратора, раскрывает конфигурацию."""
+    """Диагностика LLM-провайдера прежнего анализа; замена — /system/analysis-health.
+
+    Только для администратора, раскрывает конфигурацию. Ответ не меняется, чтобы не
+    сломать тех, кто его уже читает.
+    """
     is_healthy = await llm_client.health_check()
     return {"provider": settings.llm_provider, "healthy": is_healthy}
+
+
+@router.get("/analysis-health", response_model=AnalysisHealthResponse)
+async def analysis_health(
+    current_user: User = Depends(require_admin),
+    check_pipeline: Callable[[], Awaitable[bool | None]] = Depends(get_pipeline_health_check),
+    queue: AnalysisQueue = Depends(get_analysis_queue_instance),
+    settings: Settings = Depends(get_settings),
+) -> AnalysisHealthResponse:
+    """Готов ли анализ: доступен ли конвейер и слушает ли кто-нибудь очередь задач.
+
+    Только для администратора: раскрывает провайдера и имя очереди. Обе проверки сетевые
+    и независимые, поэтому идут параллельно.
+    """
+    healthy, probe = await asyncio.gather(check_pipeline(), queue.probe())
+    health = AnalysisHealth(
+        provider=settings.analysis_provider,
+        contract_version=contract_version(settings),
+        pipeline_healthy=healthy,
+        queue=probe,
+    )
+    return AnalysisHealthResponse(
+        status=health.status.value,
+        provider=health.provider,
+        contract_version=health.contract_version,
+        healthy=health.pipeline_healthy,
+        queue=AnalysisQueueHealth(name=probe.queue, consumers=probe.consumers),
+    )
 
 
 @router.get("/capabilities", response_model=CapabilitiesResponse)
@@ -51,6 +95,7 @@ async def get_capabilities(settings: Settings = Depends(get_settings)) -> Capabi
             idempotency_header="Idempotency-Key",
             parallel_jobs_per_document=1,
             force_required_for_ready=True,
+            contract_version=contract_version(settings),
         ),
         review=ReviewCapabilities(
             atomic_save_endpoint=f"PUT {document_base}/suggestions/review",

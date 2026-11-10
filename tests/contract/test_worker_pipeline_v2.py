@@ -6,6 +6,7 @@ analyze_document, конвейер — управляемая заглушка D
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -740,3 +741,49 @@ async def test_propagation_is_off_by_default(
         f"/api/v1/projects/{project_id}/documents/{document_id}/editor", headers=headers
     )
     assert [item["origin"] for item in editor.json()["suggestions"]] == ["model"]
+
+
+def _call_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.getMessage() == "Анализ v2: вызов конвейера"]
+
+
+async def test_pipeline_call_is_logged_with_counters_and_without_texts(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,  # noqa: F811
+    worker: Worker,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _, _, _, job_id, source_ids = await _start(client, queue, ["A", "B"])
+    caplog.set_level(logging.INFO, logger=v2.logger.name)
+
+    assert await v2.analyze_document(job_id, source_ids, 0) is None
+
+    [record] = _call_records(caplog)
+    fields = record.__dict__
+    assert (fields["job_id"], fields["request_id"], fields["attempt"]) == (job_id, f"{job_id}:0", 0)
+    assert (fields["outcome"], fields["sources"], fields["suggestions"]) == ("completed", 2, 2)
+    assert (fields["checked_blocks"], fields["flags"]) == (4, 0)
+    assert fields["blocks"] == len(worker.analyzer.requests[0].document.blocks)
+    assert isinstance(fields["duration_ms"], int) and fields["duration_ms"] >= 0
+    [dropped] = [r for r in caplog.records if r.getMessage() == "Анализ v2: часть правок отброшена"]
+    assert (dropped.__dict__["dropped_total"], dropped.__dict__["request_id"]) == (1, f"{job_id}:0")
+    # Тексты документа и правок в записи не попадают.
+    logged = " ".join(str(value) for value in fields.values())
+    assert "рабочих" not in logged and "картой" not in logged
+
+
+async def test_pipeline_timeout_is_logged(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,  # noqa: F811
+    worker: Worker,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    worker.analyzer.failures = [LLMTimeoutError("нет ответа")]
+    _, _, _, job_id, source_ids = await _start(client, queue, ["A"])
+    caplog.set_level(logging.INFO, logger=v2.logger.name)
+
+    assert await v2.analyze_document(job_id, source_ids, 0) == v2.RetryLater(countdown=30)
+
+    [record] = _call_records(caplog)
+    assert record.__dict__["outcome"] == "timeout"
+    assert "suggestions" not in record.__dict__

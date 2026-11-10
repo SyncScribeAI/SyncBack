@@ -132,3 +132,28 @@ services:
         condition: service_healthy
     networks:
       - syncscribe-net
+
+  # ML-конвейер syncscribe-ml как HTTP-сервис контракта 2.0. Поднимается только с профилем:
+  #   docker compose --profile ml up
+  # Образ собирается в их репозитории (docker build -t syncscribe-ml .). env_file не
+  # подключён намеренно: у конвейера свои LLM_*, и наши LLM_* из .env их бы перекрыли.
+  # Поэтому его настройки передаются отдельными ML_LLM_* и ML_* (см. .env.example).
+  ml:
+    image: ${ML_IMAGE:-syncscribe-ml:latest}
+    profiles: ["ml"]
+    restart: unless-stopped
+    environment:
+      SYNCSCRIBE_ML_API_KEY: ${ML_API_KEY:-}
+      # Слотов столько же, сколько процессов у worker-analysis: тогда 429 не возникает.
+      SYNCSCRIBE_ML_MAX_CONCURRENT: ${ANALYSIS_V2_CONCURRENCY:-1}
+      SYNCSCRIBE_ML_MODEL: ${ML_LLM_MODEL:-qwen3:8b}
+      LLM_PROVIDER: ${ML_LLM_PROVIDER:-ollama}
+      LLM_BASE_URL: ${ML_LLM_BASE_URL:-}
+      LLM_API_KEY: ${ML_LLM_API_KEY:-}
+      OLLAMA_HOST: ${ML_OLLAMA_HOST:-http://host.docker.internal:11434}
+      EMBED_BACKEND: ${ML_EMBED_BACKEND:-auto}
+    extra_hosts:
+      # Ollama на хосте разработчика; в Docker Desktop имя есть и без этой строки.
+      - "host.docker.internal:host-gateway"
+    networks:
+      - syncscribe-net

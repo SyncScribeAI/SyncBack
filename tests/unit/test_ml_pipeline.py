@@ -326,18 +326,25 @@ async def test_http_deadline_covers_polling() -> None:
 
 
 async def test_http_health_check() -> None:
-    assert await _http(_ok).health_check()
-    assert await _http(
-        lambda r: httpx.Response(200), health_url="http://ml.test/health"
-    ).health_check()
-    assert not await _http(
-        lambda r: httpx.Response(503), health_url="http://ml.test/health"
-    ).health_check()
+    # Без ML_HEALTH_URL проверить нечем: «неизвестно», а не «здоров».
+    assert await _http(_ok).health_check() is None
+    assert (
+        await _http(
+            lambda r: httpx.Response(200), health_url="http://ml.test/health"
+        ).health_check()
+        is True
+    )
+    assert (
+        await _http(
+            lambda r: httpx.Response(503), health_url="http://ml.test/health"
+        ).health_check()
+        is False
+    )
 
     def down(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("down")
 
-    assert not await _http(down, health_url="http://ml.test/health").health_check()
+    assert await _http(down, health_url="http://ml.test/health").health_check() is False
 
 
 # --- заглушка ---------------------------------------------------------------------------

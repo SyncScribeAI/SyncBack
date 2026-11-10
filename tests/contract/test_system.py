@@ -1,12 +1,16 @@
-"""Служебные эндпоинты: диагностика LLM только для администратора."""
+"""Служебные эндпоинты: диагностика LLM и анализа только для администратора."""
 
 import io
+
+import pytest
 
 from docx import Document as DocxDocument
 from httpx import AsyncClient
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.dependencies import get_analysis_queue_instance, get_pipeline_health_check
+from app.domain.analysis_health import QueueProbe
 from app.infrastructure.db.models.enums import UserRole
 from app.infrastructure.db.models.user import User
 from app.main import app
@@ -38,6 +42,64 @@ async def test_llm_health_requires_admin(
     assert set(response.json()) == {"provider", "healthy"}
 
 
+class _Queue:
+    def __init__(self, consumers: int | None) -> None:
+        self.consumers = consumers
+
+    async def probe(self) -> QueueProbe:
+        return QueueProbe(queue="analysis_v2", consumers=self.consumers)
+
+
+def _override(healthy: bool | None, consumers: int | None) -> None:
+    async def check() -> bool | None:
+        return healthy
+
+    app.dependency_overrides[get_pipeline_health_check] = lambda: check
+    app.dependency_overrides[get_analysis_queue_instance] = lambda: _Queue(consumers)
+
+
+async def test_analysis_health_requires_admin(
+    client: AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    _override(True, 1)
+    assert (await client.get("/api/v1/system/analysis-health")).status_code == 401
+    headers = await register_and_login(client, "plain-health@example.com")
+    response = await client.get("/api/v1/system/analysis-health", headers=headers)
+    assert response.status_code == 403, response.text
+
+
+@pytest.mark.parametrize(
+    ("healthy", "consumers", "status"),
+    [
+        (True, 1, "ok"),
+        (False, 1, "down"),
+        (True, 0, "down"),
+        (None, 1, "unknown"),
+        (True, None, "unknown"),
+        (None, 0, "down"),
+    ],
+)
+async def test_analysis_health_status(
+    client: AsyncClient,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    healthy: bool | None,
+    consumers: int | None,
+    status: str,
+) -> None:
+    _override(healthy, consumers)
+    headers = await register_and_login(client, "admin-health@example.com")
+    await _make_admin(sessionmaker, "admin-health@example.com")
+    response = await client.get("/api/v1/system/analysis-health", headers=headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == status
+    assert body["healthy"] is healthy
+    assert body["queue"] == {"name": "analysis_v2", "consumers": consumers}
+    # Провайдер по умолчанию в тестах — legacy_llm: он работает без контракта 2.0.
+    assert body["provider"] == "legacy_llm"
+    assert body["contract_version"] is None
+
+
 async def test_capabilities_is_public(client: AsyncClient) -> None:
     response = await client.get("/api/v1/system/capabilities")
     assert response.status_code == 200
@@ -54,6 +116,7 @@ async def test_capabilities_match_real_behaviour(client: AsyncClient) -> None:
     assert upload["max_size_bytes"] == upload["max_size_mb"] * 1024 * 1024
     assert caps["export"]["same_format_only"] is True
     assert caps["export"]["requires_status"] == "ready"
+    assert caps["analysis"]["contract_version"] is None
 
     # Объявленные пути существуют в приложении с тем же методом.
     paths = app.openapi()["paths"]

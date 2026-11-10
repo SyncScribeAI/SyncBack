@@ -2742,7 +2742,7 @@
           "system"
         ],
         "summary": "Llm Health",
-        "description": "Диагностика LLM-провайдера: только для администратора, раскрывает конфигурацию.",
+        "description": "Диагностика LLM-провайдера прежнего анализа; замена — /system/analysis-health.\n\nТолько для администратора, раскрывает конфигурацию. Ответ не меняется, чтобы не\nсломать тех, кто его уже читает.",
         "operationId": "llm_health_api_v1_system_llm_health_get",
         "responses": {
           "200": {
@@ -2753,6 +2753,34 @@
                   "additionalProperties": true,
                   "type": "object",
                   "title": "Response Llm Health Api V1 System Llm Health Get"
+                }
+              }
+            }
+          }
+        },
+        "deprecated": true,
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/system/analysis-health": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Analysis Health",
+        "description": "Готов ли анализ: доступен ли конвейер и слушает ли кто-нибудь очередь задач.\n\nТолько для администратора: раскрывает провайдера и имя очереди. Обе проверки сетевые\nи независимые, поэтому идут параллельно.",
+        "operationId": "analysis_health_api_v1_system_analysis_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalysisHealthResponse"
                 }
               }
             }
@@ -2805,6 +2833,18 @@
             "type": "boolean",
             "title": "Force Required For Ready",
             "description": "Повторный анализ готового документа требует force=true, иначе 409"
+          },
+          "contract_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contract Version",
+            "description": "Версия контракта ML-конвейера, по которому идёт анализ; null — прежний анализ без контракта (блоки, группы правок и флаги не заполняются)"
           }
         },
         "type": "object",
@@ -2814,6 +2854,61 @@
           "force_required_for_ready"
         ],
         "title": "AnalysisCapabilities"
+      },
+      "AnalysisHealthResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "down",
+              "unknown"
+            ],
+            "title": "Status",
+            "description": "down — конвейер недоступен или очередь никто не слушает; unknown — что-то проверить не удалось"
+          },
+          "provider": {
+            "type": "string",
+            "title": "Provider",
+            "description": "ANALYSIS_PROVIDER"
+          },
+          "contract_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contract Version"
+          },
+          "healthy": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Healthy",
+            "description": "Ответ проверки конвейера; null — проверить нечем без запуска анализа"
+          },
+          "queue": {
+            "$ref": "#/components/schemas/AnalysisQueueHealth"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "provider",
+          "contract_version",
+          "healthy",
+          "queue"
+        ],
+        "title": "AnalysisHealthResponse",
+        "description": "Готовность анализа: конвейер и воркеры очереди. Только для администратора."
       },
       "AnalysisJobConflictResponse": {
         "properties": {
@@ -2972,6 +3067,33 @@
           "cancelled"
         ],
         "title": "AnalysisJobStatusVO"
+      },
+      "AnalysisQueueHealth": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Очередь Celery, в которую уходит анализ"
+          },
+          "consumers": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consumers",
+            "description": "Сколько воркеров слушают очередь; null — брокер не ответил"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "consumers"
+        ],
+        "title": "AnalysisQueueHealth"
       },
       "AnalysisStateResponse": {
         "properties": {

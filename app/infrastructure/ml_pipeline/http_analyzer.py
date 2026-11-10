@@ -139,10 +139,10 @@ class HttpAnalyzer:
             await _sleep(backoff_delay(attempt, retry_after))
         raise AssertionError("unreachable")
 
-    async def health_check(self) -> bool:
+    async def health_check(self) -> bool | None:
         if not self._health_url:
             # Без отдельного адреса проверки здоровья доступность видна только по анализу.
-            return True
+            return None
         try:
             async with self._client() as client:
                 response = await client.get(self._health_url, timeout=5.0)

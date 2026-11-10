@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import time
 import uuid
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, field
@@ -179,14 +180,18 @@ async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
     del document
     await _store_payload(job.id, attempt, "request", lambda: encode_request(request))
 
+    started_at = time.perf_counter()
     try:
         result = await _get_analyzer().analyze(request)
     except LLMTimeoutError as exc:
+        _log_call(job.id, attempt, request, started_at, "timeout")
         return await _retry_or_fail(job.id, attempt, str(exc))
     except LLMInvalidResponseError as exc:
+        _log_call(job.id, attempt, request, started_at, "invalid_response")
         raise _JobFailed("LLM_INVALID_RESPONSE", str(exc)) from exc
     await _store_payload(job.id, attempt, "response", lambda: pydantic_core.to_json(result))
     run = _summarize(job.id, request, result)
+    _log_call(job.id, attempt, request, started_at, result.status.value, result, run)
 
     outcome = AnalysisJobLifecycle.outcome_for(result, fetched.failed)
     if outcome.retryable:
@@ -322,6 +327,38 @@ def _build_request(
         raise _JobFailed("LLM_INPUT_TOO_LARGE", str(exc)) from exc
 
 
+def _log_call(
+    job_id: uuid.UUID,
+    attempt: int,
+    request: AnalysisRequest,
+    started_at: float,
+    outcome: str,
+    result: AnalysisResult | None = None,
+    run: PipelineRunSummary | None = None,
+) -> None:
+    """Одна запись на вызов конвейера: по request_id её можно сопоставить с логами harness.
+
+    Только счётчики и идентификаторы — тексты документа и правок в лог не попадают.
+    """
+    extra: dict[str, Any] = {
+        "job_id": str(job_id),
+        "request_id": request.request_id,
+        "attempt": attempt,
+        "provider": _settings.analysis_provider,
+        "outcome": outcome,
+        "duration_ms": round((time.perf_counter() - started_at) * 1000),
+        "blocks": len(request.document.blocks),
+        "sources": len(request.sources),
+    }
+    if result is not None:
+        extra["suggestions"] = len(result.suggestions)
+        extra["flags"] = len(result.flags)
+    if run is not None:
+        extra["checked_blocks"] = run.checked_blocks
+        extra["failed_blocks"] = run.failed_blocks
+    logger.info("Анализ v2: вызов конвейера", extra=extra)
+
+
 def _map(
     job_id: uuid.UUID, attempt: int, result: AnalysisResult, request: AnalysisRequest
 ) -> list[SuggestionDraft]:
@@ -329,7 +366,13 @@ def _map(
     if mapped.dropped:
         logger.warning(
             "Анализ v2: часть правок отброшена",
-            extra={"job_id": str(job_id), "attempt": attempt, "dropped": mapped.dropped},
+            extra={
+                "job_id": str(job_id),
+                "request_id": request.request_id,
+                "attempt": attempt,
+                "dropped": mapped.dropped,
+                "dropped_total": sum(mapped.dropped.values()),
+            },
         )
     if mapped.flags:
         # Хранение флагов — отдельный пакет (B7); до него — только счётчик в логе.

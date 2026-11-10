@@ -23,12 +23,14 @@ JWTHandler создаётся один раз на процесс (_get_jwt_hand
   ту же сессию через параметр или поднять isolation level.
 """
 
+from collections.abc import Awaitable, Callable
 from functools import lru_cache
 
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
+from app.domain.interfaces.analysis_queue import AnalysisQueue
 from app.domain.interfaces.dashboard_query_service import IDashboardQueryService
 from app.domain.interfaces.event_publisher import IEventPublisher
 from app.domain.interfaces.llm_client import LLMClient
@@ -52,6 +54,7 @@ from app.infrastructure.events.publishers import SSEEventPublisher
 from app.infrastructure.events.sse_broker import get_sse_broker
 from app.infrastructure.exporters.exporter_registry import DocumentExporterRegistry
 from app.infrastructure.llm.factory import get_llm_client
+from app.infrastructure.ml_pipeline.factory import pipeline_health_check
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 from app.infrastructure.queue.celery_analysis_queue import CeleryAnalysisQueue
 from app.infrastructure.security.jwt_handler import JWTHandler
@@ -268,3 +271,14 @@ def get_llm_client_instance(
     проверять совместимость конкретной реализации с доменным контрактом.
     """
     return get_llm_client(settings)
+
+
+def get_analysis_queue_instance() -> AnalysisQueue:
+    return _get_analysis_queue()
+
+
+def get_pipeline_health_check(
+    settings: Settings = Depends(get_settings),
+) -> Callable[[], Awaitable[bool | None]]:
+    """Проверка конвейера анализа по ANALYSIS_PROVIDER; None из неё — «проверить нечем»."""
+    return pipeline_health_check(settings)

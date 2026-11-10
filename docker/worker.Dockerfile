@@ -20,5 +20,7 @@ RUN groupadd --system syncscribe && useradd --system --gid syncscribe --home /sr
     && chown -R syncscribe:syncscribe /srv/app
 USER syncscribe
 
+# Общая очередь. Анализ v2 слушает отдельный воркер (сервис worker-analysis в docker-compose.yml)
+# с той же командой, но -Q ANALYSIS_V2_QUEUE и --concurrency по числу слотов ML-конвейера.
 CMD ["celery", "-A", "app.workers.celery_app", "worker", \
-     "--loglevel=INFO", "--concurrency=4"]
+     "--loglevel=INFO", "-Q", "celery", "--concurrency=4"]

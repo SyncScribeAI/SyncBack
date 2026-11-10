@@ -140,6 +140,10 @@ class Settings(BaseSettings):
     analysis_max_sources: int = Field(default=20, gt=0)
     analysis_source_fetch_concurrency: int = Field(default=4, gt=0)
     analysis_store_payloads: bool = False
+    # Очередь Celery задачи анализа v2: её слушает отдельный воркер с числом процессов, равным
+    # числу одновременных прогонов, которое выдерживает ML-конвейер. «celery» вернёт задачу в
+    # общую очередь — для разработки с одним воркером.
+    analysis_v2_queue: str = Field(default="analysis_v2", pattern=r"^[A-Za-z0-9_.-]{1,64}$")
     suggestion_low_confidence_threshold: float = Field(default=0.7, ge=0, le=1)
     # Догоняющие правки для точных повторов фразы. Поиск — O(G·T) по тексту документа,
     # поэтому число групп и правок на группу ограничено сверху.

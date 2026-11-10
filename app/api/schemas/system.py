@@ -1,5 +1,7 @@
 """Схема /system/capabilities: всё, что фронт читает при старте вместо хардкода."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -23,6 +25,13 @@ class AnalysisCapabilities(BaseModel):
     force_required_for_ready: bool = Field(
         description="Повторный анализ готового документа требует force=true, иначе 409"
     )
+    contract_version: str | None = Field(
+        default=None,
+        description=(
+            "Версия контракта ML-конвейера, по которому идёт анализ; null — прежний анализ "
+            "без контракта (блоки, группы правок и флаги не заполняются)"
+        ),
+    )
 
 
 class ReviewCapabilities(BaseModel):
@@ -44,3 +53,27 @@ class CapabilitiesResponse(BaseModel):
     analysis: AnalysisCapabilities
     review: ReviewCapabilities
     export: ExportCapabilities
+
+
+class AnalysisQueueHealth(BaseModel):
+    name: str = Field(description="Очередь Celery, в которую уходит анализ")
+    consumers: int | None = Field(
+        description="Сколько воркеров слушают очередь; null — брокер не ответил"
+    )
+
+
+class AnalysisHealthResponse(BaseModel):
+    """Готовность анализа: конвейер и воркеры очереди. Только для администратора."""
+
+    status: Literal["ok", "down", "unknown"] = Field(
+        description=(
+            "down — конвейер недоступен или очередь никто не слушает; unknown — что-то "
+            "проверить не удалось"
+        )
+    )
+    provider: str = Field(description="ANALYSIS_PROVIDER")
+    contract_version: str | None
+    healthy: bool | None = Field(
+        description="Ответ проверки конвейера; null — проверить нечем без запуска анализа"
+    )
+    queue: AnalysisQueueHealth

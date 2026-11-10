@@ -38,22 +38,19 @@ from app.domain.exceptions import (
     LLMInvalidResponseError,
     LLMTimeoutError,
 )
-from app.domain.interfaces.event_publisher import IEventPublisher
 from app.domain.interfaces.llm_client import LLMClient
-from app.domain.interfaces.source_connector import SourceConnector, SourceKind, SourceRef
-from app.domain.lifecycle import AnalysisJobLifecycle, DocumentLifecycle
-from app.domain.services.document_events import DocumentEventOutbox
-from app.domain.value_objects import AnalysisJobStatusVO, SuggestionStatusVO
-from app.infrastructure.db.models.source import Source
+from app.domain.lifecycle import AnalysisJobLifecycle
+from app.domain.value_objects import AnalysisJobStatusVO
 from app.infrastructure.db.session import isolated_uow
-from app.infrastructure.events.publishers import RedisEventPublisher
 from app.infrastructure.llm.factory import get_llm_client
-from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
-from app.infrastructure.source_connectors.manual_upload_connector import ManualUploadConnector
-from app.infrastructure.source_connectors.url_connector import UrlConnector
-from app.infrastructure.storage.s3_storage import S3FileStorage
 from app.workers.celery_app import celery_app
 from app.workers.pipeline.suggestion_mapper import map_to_suggestions
+from app.workers.tasks.job_completion import complete_job
+from app.workers.tasks.runtime import build_source_ref as _build_source_ref
+from app.workers.tasks.runtime import event_publisher as _event_publisher
+from app.workers.tasks.runtime import get_connector_for as _get_connector_for
+from app.workers.tasks.runtime import get_parser_registry as _get_parser_registry
+from app.workers.tasks.runtime import get_storage as _get_storage
 
 logger = logging.getLogger("syncscribe.workers.analysis")
 
@@ -80,41 +77,8 @@ def _run_async[T](coro: Coroutine[Any, Any, T]) -> T:
 
 
 @functools.cache
-def _get_storage() -> S3FileStorage:
-    return S3FileStorage()
-
-
-@functools.cache
-def _get_parser_registry() -> DocumentParserRegistry:
-    return DocumentParserRegistry()
-
-
-@functools.cache
-def _get_manual_connector() -> ManualUploadConnector:
-    return ManualUploadConnector(_get_storage(), _get_parser_registry())
-
-
-@functools.cache
-def _get_url_connector() -> UrlConnector:
-    return UrlConnector()
-
-
-def _get_connector_for(source_kind: SourceKind) -> SourceConnector:
-    if source_kind == SourceKind.FILE:
-        return _get_manual_connector()
-    if source_kind == SourceKind.URL:
-        return _get_url_connector()
-    raise ValueError(f"Неизвестный SourceKind: {source_kind}")
-
-
-@functools.cache
 def _get_llm_client() -> LLMClient:
     return get_llm_client()
-
-
-def _event_publisher() -> IEventPublisher:
-    settings = get_settings()
-    return RedisEventPublisher(settings.redis_url, settings.redis_sse_channel)
 
 
 @asynccontextmanager
@@ -124,21 +88,6 @@ async def _redis() -> AsyncIterator[Redis]:
         yield client
     finally:
         await client.aclose()
-
-
-def _build_source_ref(source: Source) -> SourceRef:
-    kind_map = {"file": SourceKind.FILE, "url": SourceKind.URL}
-    source_kind = kind_map.get(source.type.value)
-    if source_kind is None:
-        raise ValueError(f"Неизвестный тип источника в БД: {source.type.value}")
-    return SourceRef(
-        id=source.id,
-        name=source.name,
-        type=source_kind,
-        storage_key=source.storage_key,
-        url=source.url,
-        uploaded_at=source.created_at,
-    )
 
 
 async def _get_cached_plain_text(job_id: uuid.UUID) -> str | None:
@@ -357,22 +306,15 @@ async def _finalize(results: list[dict[str, Any]], job_id: str) -> None:
         else:
             job_status = AnalysisJobStatusVO.SUCCESS
 
-        pending = await uow.suggestions.count_by_analysis_job_and_status(
-            job.id, SuggestionStatusVO.PENDING
+        outbox = await complete_job(
+            uow,
+            job,
+            document,
+            job_status,
+            error_code=error_code,
+            error_message=error_message,
+            publisher=_event_publisher(),
         )
-        job = await uow.jobs.update_status(
-            job, AnalysisJobLifecycle.transition(job.status, job_status), error_code, error_message
-        )
-        job.partial_success = job_status is AnalysisJobStatusVO.PARTIAL_SUCCESS
-        outbox = DocumentEventOutbox(_event_publisher())
-        if document.current_analysis_job_id == job.id:
-            doc_status = AnalysisJobLifecycle.document_status_for(
-                job_status, has_pending_suggestions=pending > 0
-            )
-            document = await uow.documents.update_status(
-                document, DocumentLifecycle.transition(document.status, doc_status)
-            )
-            outbox.record(document)
         await uow.commit()
         await outbox.flush(uow)
 

@@ -40,7 +40,10 @@ celery_app = Celery(
     "syncscribe",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["app.workers.tasks.analysis_tasks"],
+    include=[
+        "app.workers.tasks.analysis_tasks",
+        "app.workers.tasks.analysis_v2_tasks",
+    ],
 )
 
 celery_app.conf.update(

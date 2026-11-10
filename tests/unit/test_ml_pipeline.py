@@ -411,6 +411,9 @@ def test_factory_builds_each_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
         ({"ANALYSIS_PROVIDER": "ml_plugin"}, "ML_PLUGIN_ENTRYPOINT"),
         ({"ANALYSIS_PROVIDER": "ml_http"}, "ML_ENDPOINT"),
         ({"ML_WAIT_SECONDS": "1800"}, "ML_WAIT_SECONDS"),
+        # Больше visibility timeout брокера задача и пауза перед повтором быть не могут.
+        ({"ANALYSIS_TASK_TIME_LIMIT_SECONDS": "3600"}, "analysis_task_time_limit_seconds"),
+        ({"ANALYSIS_RETRY_LIMIT": "7"}, "analysis_retry_limit"),
         (
             {
                 "ENV": "production",
@@ -431,6 +434,6 @@ def test_inconsistent_settings_fail_at_startup(
 
 def test_wait_must_leave_room_inside_task_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _settings(
-        monkeypatch, ML_WAIT_SECONDS="1700", ANALYSIS_TASK_TIME_LIMIT_SECONDS="3600"
+        monkeypatch, ML_WAIT_SECONDS="1700", ANALYSIS_TASK_TIME_LIMIT_SECONDS="3000"
     )
     assert settings.ml_wait_seconds == 1700

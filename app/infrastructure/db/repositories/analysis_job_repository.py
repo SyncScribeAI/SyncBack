@@ -174,6 +174,16 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         await self._session.flush()
         return result.scalar_one_or_none() is not None
 
+    async def lock_if_active(self, job_id: uuid.UUID) -> AnalysisJob | None:
+        result = await self._session.execute(
+            select(AnalysisJob)
+            .where(AnalysisJob.id == job_id, AnalysisJob.status.in_(_ACTIVE_ORM_STATUSES))
+            .with_for_update()
+            # Объект мог быть загружен сессией раньше: статус берём из заблокированной строки.
+            .execution_options(populate_existing=True)
+        )
+        return result.scalar_one_or_none()
+
     async def update_status(
         self,
         job: AnalysisJob,

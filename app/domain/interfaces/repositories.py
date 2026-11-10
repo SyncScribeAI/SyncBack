@@ -442,6 +442,15 @@ class IAnalysisJobRepository(ABC):
         ...
 
     @abstractmethod
+    async def lock_if_active(self, job_id: uuid.UUID) -> AnalysisJob | None:
+        """Незавершённая задача под блокировкой строки до конца транзакции; иначе None.
+
+        Запись результата и смена статуса под этой блокировкой не дают двум доставкам
+        одной задачи сохранить правки дважды.
+        """
+        ...
+
+    @abstractmethod
     async def update_status(
         self,
         job: AnalysisJob,

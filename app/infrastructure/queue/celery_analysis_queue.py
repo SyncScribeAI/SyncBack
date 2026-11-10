@@ -1,4 +1,9 @@
-"""Очередь анализа поверх Celery: chord «обработка источников → финализация»."""
+"""Очередь анализа поверх Celery.
+
+legacy_llm — chord «обработка источников → финализация»; остальные провайдеры — одна
+задача analyze_document_for_job на документ (контракт ML 2.0). Порт AnalysisQueue
+не меняется: API не знает, какой конвейер выполнит анализ.
+"""
 
 from __future__ import annotations
 
@@ -9,8 +14,10 @@ from collections.abc import Sequence
 from celery import chord
 
 from app.domain.interfaces.analysis_queue import AnalysisQueue
+from app.infrastructure.ml_pipeline.factory import uses_document_analyzer
 from app.workers.celery_app import celery_app
 from app.workers.tasks.analysis_tasks import finalize_analysis_job, process_source_for_analysis_job
+from app.workers.tasks.analysis_v2_tasks import analyze_document_for_job
 
 
 class CeleryAnalysisQueue(AnalysisQueue):
@@ -23,6 +30,9 @@ class CeleryAnalysisQueue(AnalysisQueue):
 
     @staticmethod
     def _send(job_id: str, source_ids: list[str]) -> str:
+        if uses_document_analyzer():
+            # Повторы Celery сохраняют task_id, поэтому revoke по нему работает на любой попытке.
+            return str(analyze_document_for_job.delay(job_id, source_ids).id)
         if not source_ids:
             return str(finalize_analysis_job.delay([], job_id).id)
         header = [process_source_for_analysis_job.si(job_id, source_id) for source_id in source_ids]

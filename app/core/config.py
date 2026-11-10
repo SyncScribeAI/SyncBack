@@ -129,8 +129,11 @@ class Settings(BaseSettings):
     ml_poll_seconds: float = Field(default=5.0, gt=0)
     ml_wait_seconds: int = Field(default=1500, gt=0)
     ml_max_retries: int = Field(default=3, ge=0)
-    analysis_task_time_limit_seconds: int = Field(default=1800, gt=0)
-    analysis_retry_limit: int = Field(default=3, ge=0)
+    # Верхние границы держат задачу и паузу перед повтором (30·2^n с) меньше visibility
+    # timeout Redis-брокера (3600 с по умолчанию): иначе при task_acks_late брокер отдал бы
+    # ту же задачу второму воркеру, и конвейер был бы вызван дважды.
+    analysis_task_time_limit_seconds: int = Field(default=1800, gt=0, le=3000)
+    analysis_retry_limit: int = Field(default=3, ge=0, le=6)
     analysis_max_blocks: int = Field(default=1000, gt=0)
     analysis_max_block_chars: int = Field(default=20_000, gt=0)
     analysis_max_source_chars: int = Field(default=200_000, gt=0)

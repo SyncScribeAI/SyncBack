@@ -138,6 +138,8 @@ ML_HTTP_MODE=async
 
 `ML_WAIT_SECONDS` должен быть меньше `ANALYSIS_TASK_TIME_LIMIT_SECONDS`: запас нужен на загрузку источников и запись результата. Лимиты запроса `ANALYSIS_MAX_*` проверяются до вызова конвейера; превышение — ошибка `LLM_INPUT_TOO_LARGE`.
 
+При `ANALYSIS_PROVIDER` ≠ `legacy_llm` анализ выполняет одна задача Celery `analyze_document_for_job` на документ: все источники уходят в один запрос, правки и статус записываются одной транзакцией. Повторная доставка задачи или отмена во время ожидания конвейера не создают лишних правок. Таймаут и временный сбой конвейера повторяются до `ANALYSIS_RETRY_LIMIT` раз (не больше 6) с паузой 30·2ⁿ с; `ANALYSIS_TASK_TIME_LIMIT_SECONDS` — не больше 3000, чтобы задача укладывалась в visibility timeout брокера Redis. Недоступный источник делает результат частичным (`partial_success`), недоступность всех — ошибкой `SOURCES_UNAVAILABLE`. При `ANALYSIS_STORE_PAYLOADS=true` запрос и разобранный ответ сохраняются в хранилище по ключам `analysis_runs/{job_id}/{attempt}.request.json` и `….response.json`.
+
 ### Авторизация
 
 Авторизация отделена от транспорта (`app/infrastructure/llm/auth.py`). Новый способ авторизации добавляется как новая стратегия, а не как новый клиент.

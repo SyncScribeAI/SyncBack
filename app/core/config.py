@@ -140,6 +140,9 @@ class Settings(BaseSettings):
     analysis_max_sources: int = Field(default=20, gt=0)
     analysis_source_fetch_concurrency: int = Field(default=4, gt=0)
     analysis_store_payloads: bool = False
+    # Флаги «проверьте вручную» целиком уходят в агрегат редактора; лишние отбрасываются
+    # с предупреждением в логе, чтобы ответ GET /editor оставался ограниченным.
+    analysis_max_flags: int = Field(default=500, gt=0, le=5000)
     # Очередь Celery задачи анализа v2: её слушает отдельный воркер с числом процессов, равным
     # числу одновременных прогонов, которое выдерживает ML-конвейер. «celery» вернёт задачу в
     # общую очередь — для разработки с одним воркером.

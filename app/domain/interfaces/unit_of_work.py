@@ -12,6 +12,7 @@
 Namespace-атрибуты (все объявлены здесь для type-checkerа):
   documents   — IDocumentRepository
   suggestions — ISuggestionRepository
+  flags       — IAnalysisFlagRepository
   jobs        — IAnalysisJobRepository
   audit       — IAuditLogRepository
   projects    — IProjectRepository
@@ -31,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from app.domain.interfaces.repositories import (
+        IAnalysisFlagRepository,
         IAnalysisJobRepository,
         IAuditLogRepository,
         IDocumentRepository,
@@ -57,6 +59,7 @@ class IUnitOfWork(ABC):
     # Core
     documents: IDocumentRepository
     suggestions: ISuggestionRepository
+    flags: IAnalysisFlagRepository
     jobs: IAnalysisJobRepository
     audit: IAuditLogRepository
 

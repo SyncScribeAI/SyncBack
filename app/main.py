@@ -18,6 +18,7 @@ from app.api.v1.routers.dashboard import router as dashboard_router
 from app.api.v1.routers.documents import router as documents_router
 from app.api.v1.routers.documents_global import router as documents_global_router
 from app.api.v1.routers.editor import router as editor_router
+from app.api.v1.routers.flags import router as flags_router
 from app.api.v1.routers.my_documents import router as my_documents_router
 from app.api.v1.routers.projects import router as projects_router
 from app.api.v1.routers.source_files import router as source_files_router
@@ -140,6 +141,7 @@ def create_app() -> FastAPI:
     app.include_router(analysis_jobs_bulk_router, prefix="/api/v1")
     app.include_router(suggestions_router, prefix="/api/v1")
     app.include_router(editor_router, prefix="/api/v1")
+    app.include_router(flags_router, prefix="/api/v1")
     app.include_router(dashboard_router, prefix="/api/v1")
     app.include_router(sse_router, prefix="/api/v1")
     app.include_router(system_router, prefix="/api/v1")

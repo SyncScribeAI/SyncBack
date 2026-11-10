@@ -30,6 +30,16 @@ class AuditLogService:
     ) -> AuditLog:
         return await self._write(document_id, action, user_id, suggestion_id=suggestion_id)
 
+    async def log_flag_decision(
+        self,
+        user_id: uuid.UUID,
+        document_id: uuid.UUID,
+        flag_id: uuid.UUID,
+        action: AuditActionVO,
+    ) -> AuditLog:
+        # У флага нет строки в suggestions, поэтому событие — на уровне документа.
+        return await self._write(document_id, action, user_id, details={"flag_id": str(flag_id)})
+
     async def log_suggestion_decisions(
         self,
         user_id: uuid.UUID,

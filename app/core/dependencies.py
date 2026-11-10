@@ -35,6 +35,7 @@ from app.domain.interfaces.dashboard_query_service import IDashboardQueryService
 from app.domain.interfaces.event_publisher import IEventPublisher
 from app.domain.interfaces.llm_client import LLMClient
 from app.domain.policies import UploadLimits
+from app.domain.services.analysis_flag_service import AnalysisFlagService
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.domain.services.audit_log_service import AuditLogService
 from app.domain.services.auth_service import AuthService
@@ -130,6 +131,12 @@ def get_analysis_job_service(
     events: IEventPublisher = Depends(get_event_publisher),
 ) -> AnalysisJobService:
     return AnalysisJobService(uow, queue=_get_analysis_queue(), events=events)
+
+
+def get_analysis_flag_service(
+    uow: SqlAlchemyUnitOfWork = Depends(get_uow),
+) -> AnalysisFlagService:
+    return AnalysisFlagService(uow)
 
 
 def get_audit_log_service(

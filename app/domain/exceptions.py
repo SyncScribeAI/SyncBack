@@ -156,6 +156,18 @@ class StaleSuggestionJobError(SuggestionNotFoundError):
     """
 
 
+class AnalysisFlagNotFoundError(DomainError):
+    """Флага ручной проверки нет у этого документа."""
+
+
+class StaleAnalysisFlagJobError(AnalysisFlagNotFoundError):
+    """Флаг из прежнего анализа документа: клиенту нужно перечитать редактор.
+
+    Наследует AnalysisFlagNotFoundError и отдаётся как 404 — так же, как правка
+    прежнего анализа (StaleSuggestionJobError).
+    """
+
+
 class SuggestionAlreadyDecidedError(DomainError):
     """Правка уже была принята/отклонена другим запросом (race condition).
 

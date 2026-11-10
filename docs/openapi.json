@@ -2487,7 +2487,7 @@
           "editor"
         ],
         "summary": "Сбросить все изменения",
-        "description": "Сбросить все правки текущего анализа: статус suggestions → pending,\nдокумент → AWAITING_APPROVAL.",
+        "description": "Сбросить все правки и отметки флагов текущего анализа: статус suggestions и\nфлагов → pending, документ → AWAITING_APPROVAL.",
         "operationId": "reset_analysis_api_v1_projects__project_id__documents__document_id__editor_reset_post",
         "security": [
           {
@@ -2523,6 +2523,148 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ResetResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project_id}/documents/{document_id}/flags": {
+      "get": {
+        "tags": [
+          "flags"
+        ],
+        "summary": "List Flags",
+        "description": "Флаги текущего анализа в порядке ответа конвейера; без анализа — пустой список.",
+        "operationId": "list_flags_api_v1_projects__project_id__documents__document_id__flags_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Document Id"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AnalysisFlagResponse"
+                  },
+                  "title": "Response List Flags Api V1 Projects  Project Id  Documents  Document Id  Flags Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project_id}/documents/{document_id}/flags/{flag_id}": {
+      "patch": {
+        "tags": [
+          "flags"
+        ],
+        "summary": "Patch Flag",
+        "description": "Отметить флаг просмотренным или снять отметку.\n\nПовтор того же статуса — 200 без нового события аудита. Флаг прежнего анализа — 404,\nкак правка прежнего анализа. Документ без результатов анализа — 409. Отметка не\nменяет статус документа и не влияет на экспорт.",
+        "operationId": "patch_flag_api_v1_projects__project_id__documents__document_id__flags__flag_id__patch",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Document Id"
+            }
+          },
+          {
+            "name": "flag_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Flag Id"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchFlagRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalysisFlagResponse"
                 }
               }
             }
@@ -2854,6 +2996,120 @@
           "force_required_for_ready"
         ],
         "title": "AnalysisCapabilities"
+      },
+      "AnalysisFlagResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "document_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Document Id"
+          },
+          "analysis_job_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Analysis Job Id"
+          },
+          "block_id": {
+            "type": "string",
+            "title": "Block Id",
+            "description": "ref блока из content.blocks — по нему подсвечивается место"
+          },
+          "section_ref": {
+            "type": "string",
+            "title": "Section Ref"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "description": "Код причины от конвейера (например, source_conflict); неизвестный код показывается как «проверьте вручную»"
+          },
+          "original_text": {
+            "type": "string",
+            "title": "Original Text",
+            "description": "Текст блока на момент анализа"
+          },
+          "rationale": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rationale"
+          },
+          "quotes": {
+            "items": {
+              "$ref": "#/components/schemas/FlagQuoteResponse"
+            },
+            "type": "array",
+            "title": "Quotes",
+            "default": []
+          },
+          "position": {
+            "type": "integer",
+            "title": "Position",
+            "description": "Порядок флага в ответе конвейера"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "reviewed"
+            ],
+            "title": "Status"
+          },
+          "decided_by": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided By"
+          },
+          "decided_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "document_id",
+          "analysis_job_id",
+          "block_id",
+          "section_ref",
+          "reason",
+          "original_text",
+          "position",
+          "status",
+          "created_at"
+        ],
+        "title": "AnalysisFlagResponse",
+        "description": "Место документа, которое конвейер просит проверить человеку: правки нет."
       },
       "AnalysisHealthResponse": {
         "properties": {
@@ -3847,7 +4103,7 @@
             "default": 0
           },
           "counters": {
-            "$ref": "#/components/schemas/SuggestionCounters"
+            "$ref": "#/components/schemas/EditorCounters"
           },
           "permissions": {
             "$ref": "#/components/schemas/EditorPermissions"
@@ -3859,6 +4115,14 @@
             "type": "array",
             "title": "Suggestion Groups",
             "description": "Группы правок текущего анализа независимо от страницы suggestions — для «ещё N таких» без загрузки всех страниц"
+          },
+          "flags": {
+            "items": {
+              "$ref": "#/components/schemas/AnalysisFlagResponse"
+            },
+            "type": "array",
+            "title": "Flags",
+            "description": "Флаги «проверьте вручную» текущего анализа целиком, в порядке ответа конвейера; число ограничено ANALYSIS_MAX_FLAGS"
           }
         },
         "type": "object",
@@ -3941,6 +4205,41 @@
           "plain_text"
         ],
         "title": "EditorContent"
+      },
+      "EditorCounters": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "pending": {
+            "type": "integer",
+            "title": "Pending"
+          },
+          "accepted": {
+            "type": "integer",
+            "title": "Accepted"
+          },
+          "rejected": {
+            "type": "integer",
+            "title": "Rejected"
+          },
+          "flags_pending": {
+            "type": "integer",
+            "title": "Flags Pending",
+            "description": "Флаги «проверьте вручную» без отметки; не влияют на переход документа в ready",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "total",
+          "pending",
+          "accepted",
+          "rejected"
+        ],
+        "title": "EditorCounters",
+        "description": "Счётчики редактора: к счётчикам правок добавлены флаги.\n\nВ списке документов флагов нет, поэтому поле не входит в SuggestionCounters."
       },
       "EditorDocumentMeta": {
         "properties": {
@@ -4060,6 +4359,26 @@
           "requires_status"
         ],
         "title": "ExportCapabilities"
+      },
+      "FlagQuoteResponse": {
+        "properties": {
+          "source_name": {
+            "type": "string",
+            "title": "Source Name",
+            "description": "Имя источника, как его вернул конвейер"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source_name",
+          "text"
+        ],
+        "title": "FlagQuoteResponse",
+        "description": "Цитата источника, из-за которой место нужно проверить."
       },
       "HTTPValidationError": {
         "properties": {
@@ -4241,6 +4560,24 @@
           "offset"
         ],
         "title": "Page[SuggestionResponse]"
+      },
+      "PatchFlagRequest": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "reviewed"
+            ],
+            "title": "Status",
+            "description": "reviewed — место просмотрено; pending — снять отметку"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "PatchFlagRequest"
       },
       "PatchSuggestionsRequest": {
         "properties": {
@@ -4638,6 +4975,11 @@
           "suggestions_reset_count": {
             "type": "integer",
             "title": "Suggestions Reset Count"
+          },
+          "flags_reset_count": {
+            "type": "integer",
+            "title": "Flags Reset Count",
+            "default": 0
           }
         },
         "type": "object",

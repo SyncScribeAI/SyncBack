@@ -24,16 +24,26 @@ from app.domain.interfaces.document_analyzer import (
     AnalysisRequest,
     AnalysisResult,
     AnalysisStatus,
+    FlagQuote,
     ProposedChange,
+    ReviewFlag,
 )
 from app.domain.interfaces.source_connector import SourceRef
+from app.infrastructure.db.models.analysis_flag import AnalysisFlag
 from app.infrastructure.db.models.analysis_job import AnalysisJob
+from app.infrastructure.db.models.audit_log import AuditLog
 from app.infrastructure.db.models.document import Document
-from app.infrastructure.db.models.enums import AnalysisJobStatus, DocumentFormat, SourceType
+from app.infrastructure.db.models.enums import (
+    AnalysisJobStatus,
+    AuditAction,
+    DocumentFormat,
+    SourceType,
+)
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.source import Source
 from app.infrastructure.db.models.suggestion import Suggestion
 from app.infrastructure.db.models.user import User
+from app.domain.value_objects import FlagStatusVO
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.workers.tasks import analysis_v2_tasks as v2
 
@@ -342,3 +352,94 @@ async def test_suggestion_groups_on_postgres(
             await session.execute(
                 update(Suggestion).where(Suggestion.id == second_id).values(origin="manual")
             )
+
+
+class FlagAnalyzer:
+    """Флаг без правок: документ уходит в ready, флаг остаётся для ручной проверки."""
+
+    async def analyze(self, request: AnalysisRequest) -> AnalysisResult:
+        block = request.document.blocks[1]
+        return AnalysisResult(
+            status=AnalysisStatus.COMPLETED,
+            flags=(
+                ReviewFlag(
+                    "sources_conflict",
+                    block.ref,
+                    "",
+                    "Источники расходятся",
+                    (FlagQuote("Регламент", "«срок — 5 дней»"),),
+                ),
+            ),
+        )
+
+    async def health_check(self) -> bool:
+        return True
+
+
+@pytest.mark.usefixtures("worker_env")
+async def test_flags_on_postgres(
+    pg_sessionmaker: async_sessionmaker[AsyncSession],
+    scenario: Scenario,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(v2, "_get_analyzer", FlagAnalyzer)
+
+    await v2.analyze_document(str(scenario.job_id), scenario.source_ids, 0)
+
+    async with pg_sessionmaker() as session:
+        uow = SqlAlchemyUnitOfWork(session)
+        [flag] = await uow.flags.list_by_analysis_job(scenario.job_id)
+        assert (flag.block_id, flag.original_text, flag.status) == (
+            "p-1",
+            "Второй абзац документа.",
+            "pending",
+        )
+        # JSONB с кириллицей без экранирования: цитата читается по ключу в SQL.
+        quote = await session.scalar(
+            select(AnalysisFlag.quotes[0]["text"].astext).where(AnalysisFlag.id == flag.id)
+        )
+        assert quote == "«срок — 5 дней»"
+        user_id = await session.scalar(
+            select(Project.owner_id)
+            .join(Document, Document.project_id == Project.id)
+            .where(Document.id == flag.document_id)
+        )
+        assert user_id is not None
+        # Повторная отметка — тот же UPDATE без изменений: второе событие аудита не нужно.
+        assert await uow.flags.set_status(flag, FlagStatusVO.REVIEWED, user_id) is True
+        assert await uow.flags.set_status(flag, FlagStatusVO.REVIEWED, user_id) is False
+        assert flag.status == "reviewed" and flag.decided_by == user_id
+        assert await uow.flags.reset_to_pending(scenario.job_id) == 1
+        await uow.audit.create(
+            document_id=flag.document_id,
+            user_id=user_id,
+            action=AuditAction.FLAG_REVIEW.value,
+            details={"flag_id": str(flag.id)},
+        )
+        await session.commit()
+        flag_id, document_id = flag.id, flag.document_id
+
+    async with pg_sessionmaker() as session:
+        # Событие флага — действие над документом: ссылка на правку запрещена.
+        session.add(
+            AuditLog(
+                document_id=document_id,
+                suggestion_id=uuid.uuid4(),
+                action=AuditAction.FLAG_REOPEN,
+            )
+        )
+        with pytest.raises(Exception, match="ck_audit_logs_target"):
+            await session.flush()
+
+    async with pg_sessionmaker() as session:
+        with pytest.raises(Exception, match="ck_analysis_flags_status"):
+            await session.execute(
+                update(AnalysisFlag).where(AnalysisFlag.id == flag_id).values(status="accepted")
+            )
+
+    async with pg_sessionmaker() as session:
+        await session.execute(
+            AnalysisJob.__table__.delete().where(AnalysisJob.id == scenario.job_id)
+        )
+        await session.commit()
+        assert await session.get(AnalysisFlag, flag_id) is None

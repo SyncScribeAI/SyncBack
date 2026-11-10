@@ -1,6 +1,6 @@
 # Схема базы данных SyncScribe
 
-Описание соответствует схеме после применения всех миграций Alembic (ревизия `0034`). Данные собраны из каталога PostgreSQL на чистой базе после `alembic upgrade head`. Полный DDL — в [`schema.sql`](schema.sql).
+Описание соответствует схеме после применения всех миграций Alembic (ревизия `0035`). Данные собраны из каталога PostgreSQL на чистой базе после `alembic upgrade head`. Полный DDL — в [`schema.sql`](schema.sql).
 
 Источник истины — миграции в `alembic/versions`. После новой миграции оба файла нужно обновить (см. [раздел в конце](#как-обновить)).
 
@@ -21,6 +21,9 @@ erDiagram
     suggestions ||--o{ suggestion_sources : "основана на"
     sources ||--o{ suggestion_sources : "подтверждает"
     users |o--o{ suggestions : "решает"
+    analysis_jobs ||--o{ analysis_flags : "просит проверить"
+    documents ||--o{ analysis_flags : ""
+    users |o--o{ analysis_flags : "отмечает"
     suggestions |o--o{ audit_logs : ""
     documents |o--o{ audit_logs : ""
     users |o--o{ audit_logs : ""
@@ -39,7 +42,7 @@ erDiagram
 | Тип | Значения |
 |---|---|
 | `analysis_job_status` | `pending`, `processing`, `success`, `failed`, `cancelled`, `partial_success`, `dispatched` |
-| `audit_action` | `accept`, `reject`, `download`, `bulk_accept`, `finalize`, `reopen`, `bulk_reject`, `finalize_review`, `reset` |
+| `audit_action` | `accept`, `reject`, `download`, `bulk_accept`, `finalize`, `reopen`, `bulk_reject`, `finalize_review`, `reset`, `flag_review`, `flag_reopen` |
 | `block_type_enum` | `heading`, `paragraph`, `list_item`, `code`, `table`, `other` |
 | `change_type` | `add`, `modify`, `delete` |
 | `document_format` | `doc`, `docx`, `txt`, `markdown` |
@@ -265,9 +268,40 @@ erDiagram
 - `ix_suggestions_job_order` (btree): `(analysis_job_id, created_at, "position", id)`
 - `ix_suggestions_job_status` (btree): `(analysis_job_id, status)`
 
+### analysis_flags
+
+Флаги «проверьте вручную» из ответа конвейера ML 2.0: место документа, которое человек должен сверить с цитатами источников. Правки нет, поэтому флаг не участвует в review-цикле, экспорте и счётчиках правок и не держит документ в `awaiting_approval`. Отметка «просмотрено» — только память пользователя.
+
+| Колонка | Тип | NULL | По умолчанию | Описание |
+|---|---|---|---|---|
+| `id` | `uuid` | нет |  | PK |
+| `analysis_job_id` | `uuid` | нет |  | → `analysis_jobs` (CASCADE) |
+| `document_id` | `uuid` | нет |  | → `documents` (CASCADE). Денормализация, как у `suggestions` |
+| `block_id` | `character varying(255)` | нет |  | ref блока документа (`content.blocks` редактора) |
+| `section_ref` | `character varying(500)` | нет |  | Заголовок раздела документа |
+| `reason` | `character varying(64)` | нет |  | Код причины от конвейера; пустой — `unknown` |
+| `original_text` | `text` | нет |  | Текст блока на момент анализа (наш, а не копия из ответа) |
+| `rationale` | `text` | да |  | Обоснование от конвейера |
+| `quotes` | `jsonb` | нет |  | `[{"source_name": …, "text": …}]` — цитаты источников |
+| `position` | `integer` | нет |  | Номер флага в ответе конвейера |
+| `status` | `character varying(16)` | нет | `'pending'::character varying` | `pending`, `reviewed` |
+| `decided_by` | `uuid` | да |  | → `users` (SET NULL). Кто отметил |
+| `decided_at` | `timestamp with time zone` | да |  | Когда отметил |
+| `created_at` | `timestamp with time zone` | нет | `now()` |  |
+
+Ограничения:
+
+- `ck_analysis_flags_status`: `CHECK (((status)::text = ANY ((ARRAY['pending'::character varying, 'reviewed'::character varying])::text[])))`
+
+Индексы:
+
+- `ix_analysis_flags_decided_by` (btree): `(decided_by) WHERE (decided_by IS NOT NULL)`
+- `ix_analysis_flags_document_id` (btree): `(document_id)`
+- `ix_analysis_flags_job_position` (btree): `(analysis_job_id, "position")`
+
 ### audit_logs
 
-Журнал решений по правкам, финализации и скачиваний.
+Журнал решений по правкам, отметок флагов, финализации и скачиваний. У событий флагов (`flag_review`, `flag_reopen`) `suggestion_id` пуст, id флага — в `details.flag_id`.
 
 | Колонка | Тип | NULL | По умолчанию | Описание |
 |---|---|---|---|---|
@@ -277,12 +311,12 @@ erDiagram
 | `action` | `audit_action` | нет |  | Действие |
 | `created_at` | `timestamp with time zone` | нет | `now()` |  |
 | `document_id` | `uuid` | да |  | → `documents` (CASCADE) |
-| `details` | `jsonb` | да |  | Дополнительные сведения в JSON |
+| `details` | `jsonb` | да |  | Дополнительные сведения в JSON; у событий флагов — `{"flag_id": …}` |
 
 Ограничения:
 
 - `ck_audit_logs_ref_not_null`: `CHECK (((suggestion_id IS NOT NULL) OR (document_id IS NOT NULL)))`
-- `ck_audit_logs_target`: `CHECK ((((action = ANY (ARRAY['download'::audit_action, 'finalize'::audit_action, 'finalize_review'::audit_action])) AND (document_id IS NOT NULL) AND (suggestion_id IS NULL)) OR ((action <> ALL (ARRAY['download'::audit_action, 'finalize'::audit_action, 'finalize_review'::audit_action])) AND (suggestion_id IS NOT NULL))))`
+- `ck_audit_logs_target`: `CHECK ((((action = ANY (ARRAY['download'::audit_action, 'finalize'::audit_action, 'finalize_review'::audit_action, 'flag_review'::audit_action, 'flag_reopen'::audit_action])) AND (document_id IS NOT NULL) AND (suggestion_id IS NULL)) OR ((action <> ALL (ARRAY['download'::audit_action, 'finalize'::audit_action, 'finalize_review'::audit_action, 'flag_review'::audit_action, 'flag_reopen'::audit_action])) AND (suggestion_id IS NOT NULL))))`
 
 Индексы:
 
@@ -365,7 +399,7 @@ erDiagram
 - Источник обрабатывается в запуске не больше одного раза: уникальность `(job_id, source_id)` в `analysis_job_sources`.
 - Связь правки с одним источником записывается не больше одного раза: составной PK `(suggestion_id, source_id)` в `suggestion_sources`; удаление правки или источника каскадно удаляет связь.
 - У файлового источника обязателен ключ в хранилище, у ссылки — адрес: `ck_sources_type_field_consistency`.
-- Запись аудита о скачивании и финализации ссылается на документ, запись о решении — на правку: `ck_audit_logs_target`.
+- Запись аудита о скачивании, финализации и отметке флага ссылается на документ, запись о решении — на правку: `ck_audit_logs_target`.
 - Удаление пользователя, проекта или документа каскадно удаляет зависимые данные. Если удалён пользователь, принимавший решения по чужим документам (например, администратор), его решения и записи аудита остаются с пустым автором (`SET NULL`).
 - Поиск документов по имени использует trigram-индекс `ix_documents_name_trgm` (расширение `pg_trgm`).
 

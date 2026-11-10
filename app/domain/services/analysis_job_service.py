@@ -60,10 +60,11 @@ class BulkJobOutcome:
 
 @dataclass
 class ResetResult:
-    """Результат сброса ревью: сколько правок вернулось в PENDING и актуальный документ."""
+    """Результат сброса ревью: сколько правок и флагов вернулось в PENDING и актуальный документ."""
 
     reset_count: int
     document: DocumentProtocol
+    flags_reset_count: int = 0
 
 
 class AnalysisJobService:
@@ -313,7 +314,7 @@ class AnalysisJobService:
         project_id: uuid.UUID,
         document_id: uuid.UUID,
     ) -> ResetResult:
-        """Вернуть все правки текущего анализа в PENDING, документ — в AWAITING_APPROVAL."""
+        """Вернуть правки и флаги текущего анализа в PENDING, документ — в AWAITING_APPROVAL."""
         async with self._uow:
             document = await self._uow.documents.get_by_id(document_id)
             if document is None or document.project_id != project_id:
@@ -330,10 +331,15 @@ class AnalysisJobService:
             reset_ids = await self._uow.suggestions.reset_to_pending(
                 document.current_analysis_job_id
             )
+            # «Сбросить все изменения» возвращает и отметки флагов: после сброса документ
+            # проверяют заново, и прежняя отметка «просмотрено» уже ничего не значит.
+            flags_reset = await self._uow.flags.reset_to_pending(document.current_analysis_job_id)
             document = await self._set_document_status(document, DocumentStatusVO.AWAITING_APPROVAL)
             await self._commit()
 
-        return ResetResult(reset_count=len(reset_ids), document=document)
+        return ResetResult(
+            reset_count=len(reset_ids), document=document, flags_reset_count=flags_reset
+        )
 
     async def bulk_create_jobs_for_project(
         self,

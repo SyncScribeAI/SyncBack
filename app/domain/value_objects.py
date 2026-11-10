@@ -43,6 +43,13 @@ class SuggestionOriginVO(StrEnum):
     PROPAGATED = "propagated"
 
 
+class FlagStatusVO(StrEnum):
+    """Флаг «проверьте вручную»: правки нет, есть только отметка, что место просмотрено."""
+
+    PENDING = "pending"
+    REVIEWED = "reviewed"
+
+
 class AnalysisJobStatusVO(StrEnum):
     PENDING = "pending"
     DISPATCHED = "dispatched"  # синхронизировано с enums.AnalysisJobStatus
@@ -95,6 +102,8 @@ class AuditActionVO(StrEnum):
     REOPEN = "reopen"
     RESET = "reset"  # отмена ранее принятого/отклонённого решения
     DOWNLOAD = "download"  # синхронизировано с enums.AuditAction
+    FLAG_REVIEW = "flag_review"
+    FLAG_REOPEN = "flag_reopen"
 
 
 # ---------------------------------------------------------------------------

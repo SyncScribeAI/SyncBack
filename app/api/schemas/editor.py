@@ -8,6 +8,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from app.api.schemas.document import DocumentSectionResponse, SuggestionCounters
+from app.api.schemas.flag import AnalysisFlagResponse
 from app.api.schemas.suggestion import SuggestionResponse
 from app.domain.interfaces.document_parser import DocumentBlockType
 from app.domain.value_objects import DocumentStatusVO
@@ -61,19 +62,40 @@ class SuggestionGroupResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class EditorCounters(SuggestionCounters):
+    """Счётчики редактора: к счётчикам правок добавлены флаги.
+
+    В списке документов флагов нет, поэтому поле не входит в SuggestionCounters.
+    """
+
+    flags_pending: int = Field(
+        default=0,
+        description=(
+            "Флаги «проверьте вручную» без отметки; не влияют на переход документа в ready"
+        ),
+    )
+
+
 class EditorAggregateResponse(BaseModel):
     document: EditorDocumentMeta
     content: EditorContent | None = None
     original_content: EditorContent | None = None
     suggestions: list[SuggestionResponse] = []
     suggestions_total: int = 0
-    counters: SuggestionCounters
+    counters: EditorCounters
     permissions: EditorPermissions
     suggestion_groups: list[SuggestionGroupResponse] = Field(
         default_factory=list,
         description=(
             "Группы правок текущего анализа независимо от страницы suggestions —"
             " для «ещё N таких» без загрузки всех страниц"
+        ),
+    )
+    flags: list[AnalysisFlagResponse] = Field(
+        default_factory=list,
+        description=(
+            "Флаги «проверьте вручную» текущего анализа целиком, в порядке ответа конвейера;"
+            " число ограничено ANALYSIS_MAX_FLAGS"
         ),
     )
 
@@ -83,6 +105,7 @@ class ResetResponse(BaseModel):
     document_status: str
     review_version: int
     suggestions_reset_count: int
+    flags_reset_count: int = 0
 
 
 class CancelAllSuggestionsResponse(BaseModel):

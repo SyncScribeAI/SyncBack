@@ -44,6 +44,8 @@ from app.domain.value_objects import SuggestionOriginVO
 NO_SECTION = "Без раздела"
 # Длина колонки suggestions.section_ref.
 _SECTION_REF_MAX = 500
+# Длина колонки analysis_flags.reason; причина — код вроде source_conflict, не текст.
+_FLAG_REASON_MAX = 64
 _KNOWN_KINDS = frozenset(kind.value for kind in ChangeKind)
 
 
@@ -88,7 +90,13 @@ class BlockContext:
     section_ref: str
 
 
-def map_result(result: AnalysisResult, blocks: Iterable[BlockPayload]) -> MappedResult:
+def map_result(
+    result: AnalysisResult, blocks: Iterable[BlockPayload], *, max_flags: int | None = None
+) -> MappedResult:
+    """max_flags — сколько флагов сохранить; остальные учитываются в dropped как flags_over_limit.
+
+    Флаги целиком уходят в агрегат редактора, и лимит держит его размер ограниченным.
+    """
     index = index_blocks(blocks)
     mapped = MappedResult()
     cursors: dict[tuple[str, str], int] = {}
@@ -99,6 +107,9 @@ def map_result(result: AnalysisResult, blocks: Iterable[BlockPayload]) -> Mapped
         else:
             mapped.suggestions.append(draft_or_reason)
     for flag in result.flags:
+        if max_flags is not None and len(mapped.flags) >= max_flags:
+            mapped.dropped["flags_over_limit"] = mapped.dropped.get("flags_over_limit", 0) + 1
+            continue
         context = index.get(flag.block_ref)
         if context is None:
             mapped.dropped["flag_block_not_found"] = (
@@ -110,7 +121,7 @@ def map_result(result: AnalysisResult, blocks: Iterable[BlockPayload]) -> Mapped
                 block_ref=flag.block_ref,
                 section_ref=context.section_ref,
                 # Неизвестная причина — тоже повод для ручной проверки, а не для отброса.
-                reason=flag.reason or "unknown",
+                reason=(flag.reason or "unknown")[:_FLAG_REASON_MAX],
                 # Текст берём из нашего блока: экспорт и подсветка опираются на него,
                 # а не на копию, которую вернул конвейер.
                 original_text=context.block.text,

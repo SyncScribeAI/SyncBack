@@ -91,7 +91,14 @@ async def test_editor_for_draft_document(client: AsyncClient) -> None:
     # Для черновика оригинал совпадает с содержимым: отдельного файла нет.
     assert body["original_content"] == body["content"]
     assert body["suggestions"] == []
-    assert body["counters"] == {"total": 0, "pending": 0, "accepted": 0, "rejected": 0}
+    assert body["counters"] == {
+        "total": 0,
+        "pending": 0,
+        "accepted": 0,
+        "rejected": 0,
+        "flags_pending": 0,
+    }
+    assert body["flags"] == []
     assert body["permissions"] == {
         "can_analyze": True,
         "can_review": False,
@@ -122,7 +129,13 @@ async def test_editor_with_review_results_and_pagination(
     assert body["document"]["view_mode"] == "suggested"
     assert len(body["suggestions"]) == 2
     assert body["suggestions_total"] == 3
-    assert body["counters"] == {"total": 3, "pending": 2, "accepted": 1, "rejected": 0}
+    assert body["counters"] == {
+        "total": 3,
+        "pending": 2,
+        "accepted": 1,
+        "rejected": 0,
+        "flags_pending": 0,
+    }
     assert body["original_content"]["plain_text"] == body["content"]["plain_text"]
     assert body["permissions"]["can_review"] is True
     # Источники заблокированы только во время анализа; на ревью их можно менять.

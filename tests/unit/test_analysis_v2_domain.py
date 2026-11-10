@@ -275,6 +275,19 @@ def test_flags_keep_unknown_reason_and_use_our_block_text() -> None:
     assert mapped.dropped == {"flag_block_not_found": 1}
 
 
+def test_flags_over_limit_are_counted_and_reason_fits_column() -> None:
+    flags = tuple(ReviewFlag("r" * 100, "p-2", "x") for _ in range(3))
+    mapped = map_result(_completed(flags=flags), _request().document.blocks, max_flags=2)
+    assert [f.position for f in mapped.flags] == [0, 1]
+    assert {len(f.reason) for f in mapped.flags} == {64}
+    assert mapped.dropped == {"flags_over_limit": 1}
+
+
+def test_flags_are_not_limited_by_default() -> None:
+    flags = tuple(ReviewFlag("x", "p-2", "x") for _ in range(3))
+    assert len(map_result(_completed(flags=flags), _request().document.blocks).flags) == 3
+
+
 # --- исход задачи --------------------------------------------------------------------
 
 

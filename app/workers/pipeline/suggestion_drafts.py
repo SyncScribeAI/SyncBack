@@ -33,6 +33,8 @@ def to_suggestions(
             start_offset=draft.start_offset,
             end_offset=draft.end_offset,
             position=draft.position,
+            group_key=draft.group_key,
+            origin=draft.origin.value,
             change_type=ChangeType(draft.change_type.value),
             original_text=draft.original_text,
             suggested_text=draft.suggested_text,

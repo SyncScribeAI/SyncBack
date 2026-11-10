@@ -56,6 +56,18 @@ class SuggestionResponse(BaseModel):
     position: int = Field(
         default=0, description="Номер правки в ответе конвейера внутри одного анализа"
     )
+    group_key: str | None = Field(
+        default=None,
+        description=(
+            "Ключ группы правок одной фразы (тип, old_text и new_text без учёта регистра,"
+            " пробелов и «ё/е»); None — у правки нет пары. Все правки группы:"
+            " GET …/suggestions?group_key=…"
+        ),
+    )
+    origin: Literal["model", "propagated"] = Field(
+        default="model",
+        description="model — правка конвейера; propagated — найдена бэкендом по точному повтору",
+    )
     status: Literal["pending", "accepted", "rejected"]
     # None — решение ещё не принято или сброшено.
     decided_by: uuid.UUID | None = None
@@ -69,6 +81,11 @@ class SuggestionResponse(BaseModel):
     def _position_before_insert(cls, value: object) -> object:
         # default и server_default срабатывают только при INSERT: у правки до записи в БД здесь None.
         return 0 if value is None else value
+
+    @field_validator("origin", mode="before")
+    @classmethod
+    def _origin_before_insert(cls, value: object) -> object:
+        return "model" if value is None else value
 
 
 # ---------------------------------------------------------------------------

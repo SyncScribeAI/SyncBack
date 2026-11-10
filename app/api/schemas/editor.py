@@ -5,7 +5,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.api.schemas.document import DocumentSectionResponse, SuggestionCounters
 from app.api.schemas.suggestion import SuggestionResponse
@@ -51,6 +51,16 @@ class EditorPermissions(BaseModel):
     sources_is_editable: bool = True
 
 
+class SuggestionGroupResponse(BaseModel):
+    """Группа правок одной фразы: сколько в ней правок и сколько ещё не решено."""
+
+    group_key: str
+    size: int
+    pending: int
+
+    model_config = {"from_attributes": True}
+
+
 class EditorAggregateResponse(BaseModel):
     document: EditorDocumentMeta
     content: EditorContent | None = None
@@ -59,6 +69,13 @@ class EditorAggregateResponse(BaseModel):
     suggestions_total: int = 0
     counters: SuggestionCounters
     permissions: EditorPermissions
+    suggestion_groups: list[SuggestionGroupResponse] = Field(
+        default_factory=list,
+        description=(
+            "Группы правок текущего анализа независимо от страницы suggestions —"
+            " для «ещё N таких» без загрузки всех страниц"
+        ),
+    )
 
 
 class ResetResponse(BaseModel):

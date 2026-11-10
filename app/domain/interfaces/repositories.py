@@ -19,6 +19,7 @@ from app.domain.value_objects import (
     DocumentStatusVO,
     ProjectContentCounts,
     SourceScopeVO,
+    SuggestionGroupSummary,
     SuggestionStatusVO,
 )
 
@@ -282,12 +283,18 @@ class ISuggestionRepository(ABC):
         limit: int,
         offset: int,
         status: SuggestionStatusVO | None = None,
+        group_key: str | None = None,
     ) -> tuple[list[Suggestion], int]:
         """Страница и total одним SELECT с оконной функцией.
 
         func.count().over() вычисляется ДО применения LIMIT/OFFSET в PostgreSQL,
         поэтому возвращает полный COUNT фильтрованной выборки.
         """
+        ...
+
+    @abstractmethod
+    async def list_groups(self, analysis_job_id: uuid.UUID) -> list[SuggestionGroupSummary]:
+        """Группы правок задачи с размером и числом нерешённых, одним GROUP BY."""
         ...
 
     @abstractmethod

@@ -23,6 +23,7 @@ from app.api.schemas.editor import (
     EditorDocumentMeta,
     EditorPermissions,
     ResetResponse,
+    SuggestionGroupResponse,
 )
 from app.api.schemas.suggestion import SuggestionResponse
 from app.core.dependencies import (
@@ -145,6 +146,7 @@ async def get_editor_aggregate(
         PaginationParams(limit=suggestions_limit, offset=suggestions_offset),
     )
     status_counts = await suggestion_service.count_by_document_and_status(project.id, document_id)
+    groups = await suggestion_service.list_suggestion_groups(project.id, document_id)
 
     original_content = original_content_raw if needs_original else editor_content
 
@@ -177,6 +179,7 @@ async def get_editor_aggregate(
         suggestions_total=suggestions_total,
         counters=counters,
         permissions=permissions,
+        suggestion_groups=[SuggestionGroupResponse.model_validate(g) for g in groups],
     )
 
 

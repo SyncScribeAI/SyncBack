@@ -34,10 +34,12 @@ from app.infrastructure.db.models.analysis_job import AnalysisJob
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.suggestion import Suggestion
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
+from app.domain.value_objects import DocumentStatusVO
 from tests.contract.conftest import (
     InMemoryFileStorage,
     create_project,
     register_and_login,
+    set_document_status,
     upload_document,
 )
 from tests.contract.test_analysis_jobs import FakeAnalysisQueue, queue  # noqa: F401
@@ -146,12 +148,15 @@ def worker(
 
 
 async def _start(
-    client: AsyncClient, queue: FakeAnalysisQueue, source_names: list[str]
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,
+    source_names: list[str],
+    content: bytes = DOCUMENT,
 ) -> tuple[dict[str, str], str, str, str, list[str]]:
     headers = await register_and_login(client)
     project_id = await create_project(client, headers)
     document = await upload_document(
-        client, headers, project_id, filename="spec.md", content=DOCUMENT
+        client, headers, project_id, filename="spec.md", content=content
     )
     for name in source_names:
         response = await client.post(
@@ -589,3 +594,149 @@ async def test_failed_pipeline_answer_keeps_request_id(
     assert job.request_id == f"{job_id}:0"
     assert job.pipeline_meta is not None and job.pipeline_meta["meta"] == {"blocks": 0}
     assert (job.checked_blocks, job.failed_blocks) == (None, None)
+
+
+# ── повторяющиеся фразы (B5a) ────────────────────────────────────────────────────────────────
+
+REPEATED = (
+    "## Сроки\n\n"
+    "Ответ — 10 дней. Повторный ответ — 10 дней.\n\n"
+    "Возврат — 10 дней.\n\n"
+    "## Прочее\n\n"
+    "Хранение — 10 дней.\n"
+).encode()
+
+
+def _ten_days(request: AnalysisRequest, refs: list[str]) -> AnalysisResult:
+    return AnalysisResult(
+        status=AnalysisStatus.COMPLETED,
+        suggestions=tuple(
+            ProposedChange(kind="modify", block_ref=ref, old_text="10 дней", new_text="5 дней")
+            for ref in refs
+        ),
+    )
+
+
+async def test_repeated_phrase_gets_change_per_occurrence_and_one_group(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,  # noqa: F811
+    worker: Worker,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    def three_places(request: AnalysisRequest) -> AnalysisResult:
+        first = _block_ref(request, "Повторный")
+        return _ten_days(request, [first, first, _block_ref(request, "Возврат")])
+
+    worker.analyzer.respond = three_places
+    headers, project_id, document_id, job_id, source_ids = await _start(
+        client, queue, ["A"], content=REPEATED
+    )
+    await v2.analyze_document(job_id, source_ids, 0)
+
+    base = f"/api/v1/projects/{project_id}/documents/{document_id}"
+    editor = (await client.get(f"{base}/editor", headers=headers)).json()
+    plain_text = editor["content"]["plain_text"]
+    items = editor["suggestions"]
+    assert len(items) == 3
+    starts = [item["start_offset"] for item in items]
+    assert starts == sorted(set(starts)), "каждая правка — своё вхождение"
+    assert all(plain_text[i["start_offset"] : i["end_offset"]] == "10 дней" for i in items)
+    keys = {item["group_key"] for item in items}
+    assert len(keys) == 1 and None not in keys
+    assert {item["origin"] for item in items} == {"model"}
+    (group_key,) = keys
+    assert editor["suggestion_groups"] == [{"group_key": group_key, "size": 3, "pending": 3}]
+
+    group = await client.get(
+        f"{base}/suggestions", params={"group_key": group_key, "limit": 1}, headers=headers
+    )
+    assert group.status_code == 200, group.text
+    assert group.json()["total"] == 3
+
+    first, second, third = (item["id"] for item in items)
+    response = await client.patch(
+        f"{base}/suggestions", json={"ids": [first, third], "status": "accepted"}, headers=headers
+    )
+    assert response.status_code == 200, response.text
+    response = await client.patch(
+        f"{base}/suggestions", json={"ids": [second], "status": "rejected"}, headers=headers
+    )
+    assert response.status_code == 200, response.text
+    editor = (await client.get(f"{base}/editor", headers=headers)).json()
+    assert editor["suggestion_groups"] == [{"group_key": group_key, "size": 3, "pending": 0}]
+
+    await set_document_status(sessionmaker, document_id, DocumentStatusVO.READY)
+    exported = await client.get(f"{base}/export", headers=headers)
+    assert exported.status_code == 200, exported.text
+    assert exported.text == (
+        "## Сроки\n\n"
+        "Ответ — 5 дней. Повторный ответ — 10 дней.\n\n"
+        "Возврат — 5 дней.\n\n"
+        "## Прочее\n\n"
+        "Хранение — 10 дней.\n"
+    )
+
+
+async def test_more_changes_than_occurrences_are_dropped(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,  # noqa: F811
+    worker: Worker,
+) -> None:
+    worker.analyzer.respond = lambda request: _ten_days(
+        request, [_block_ref(request, "Возврат")] * 2
+    )
+    headers, project_id, document_id, job_id, source_ids = await _start(
+        client, queue, ["A"], content=REPEATED
+    )
+    await v2.analyze_document(job_id, source_ids, 0)
+
+    editor = await client.get(
+        f"/api/v1/projects/{project_id}/documents/{document_id}/editor", headers=headers
+    )
+    body = editor.json()
+    assert len(body["suggestions"]) == 1
+    # Единственная правка фразы — без группы.
+    assert body["suggestions"][0]["group_key"] is None
+    assert body["suggestion_groups"] == []
+
+
+async def test_propagation_covers_remaining_exact_repeats(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,  # noqa: F811
+    worker: Worker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker.configure(monkeypatch, suggestion_propagate_exact=True)
+    worker.analyzer.respond = lambda request: _ten_days(request, [_block_ref(request, "Возврат")])
+    headers, project_id, document_id, job_id, source_ids = await _start(
+        client, queue, ["A"], content=REPEATED
+    )
+    await v2.analyze_document(job_id, source_ids, 0)
+
+    editor = await client.get(
+        f"/api/v1/projects/{project_id}/documents/{document_id}/editor", headers=headers
+    )
+    body = editor.json()
+    items = body["suggestions"]
+    assert [item["origin"] for item in items] == ["model"] + ["propagated"] * 3
+    assert len({item["group_key"] for item in items}) == 1
+    assert {item["section_ref"] for item in items} == {"Сроки", "Прочее"}
+    assert all("Найдено автоматически" in (item["rationale"] or "") for item in items[1:])
+    assert body["suggestion_groups"][0]["size"] == 4
+
+
+async def test_propagation_is_off_by_default(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,  # noqa: F811
+    worker: Worker,
+) -> None:
+    worker.analyzer.respond = lambda request: _ten_days(request, [_block_ref(request, "Возврат")])
+    headers, project_id, document_id, job_id, source_ids = await _start(
+        client, queue, ["A"], content=REPEATED
+    )
+    await v2.analyze_document(job_id, source_ids, 0)
+
+    editor = await client.get(
+        f"/api/v1/projects/{project_id}/documents/{document_id}/editor", headers=headers
+    )
+    assert [item["origin"] for item in editor.json()["suggestions"]] == ["model"]

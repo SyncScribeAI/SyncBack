@@ -6,7 +6,8 @@
 
 Шаги: задача → processing; блоки документа из файла; тексты источников параллельно (не
 больше ANALYSIS_SOURCE_FETCH_CONCURRENCY одновременно); лимиты запроса; вызов адаптера;
-доменный маппер; запись правок и статусов.
+доменный маппер; группы правок одной фразы (и догоняющие правки при
+SUGGESTION_PROPAGATE_EXACT); запись правок и статусов.
 
 Повторная доставка и отмена. Результат пишется под блокировкой строки задачи
 (lock_if_active) только пока она активна: вторая доставка той же задачи или отмена
@@ -63,6 +64,7 @@ from app.domain.lifecycle import AnalysisJobLifecycle
 from app.domain.pipeline_run import PipelineRunSummary, summarize_run
 from app.domain.services.analysis_request_builder import DocumentInput, build_analysis_request
 from app.domain.services.analysis_result_mapper import SuggestionDraft, map_result
+from app.domain.services.suggestion_groups import PropagationLimits, finalize_drafts
 from app.domain.source_text import ensure_source_fits
 from app.domain.value_objects import AnalysisJobStatusVO
 from app.infrastructure.db.session import isolated_uow
@@ -335,7 +337,23 @@ def _map(
             "Анализ v2: флаги ручной проверки не сохранены",
             extra={"job_id": str(job_id), "flags": len(mapped.flags)},
         )
-    return mapped.suggestions
+    drafts = finalize_drafts(mapped.suggestions, request.document.blocks, _propagation())
+    propagated = len(drafts) - len(mapped.suggestions)
+    if propagated:
+        logger.info(
+            "Анализ v2: добавлены догоняющие правки",
+            extra={"job_id": str(job_id), "propagated": propagated},
+        )
+    return drafts
+
+
+def _propagation() -> PropagationLimits | None:
+    if not _settings.suggestion_propagate_exact:
+        return None
+    return PropagationLimits(
+        max_groups=_settings.suggestion_propagate_max_groups,
+        max_per_group=_settings.suggestion_propagate_max_per_group,
+    )
 
 
 def _summarize(

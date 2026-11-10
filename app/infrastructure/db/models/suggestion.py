@@ -44,6 +44,17 @@ class Suggestion(Base):
         Index("ix_suggestions_document_status", "document_id", "status"),
         # Порядок выдачи правок задачи: ORDER BY created_at, position, id.
         Index("ix_suggestions_job_order", "analysis_job_id", "created_at", "position", "id"),
+        CheckConstraint(
+            "origin IN ('model', 'propagated')",
+            name="ck_suggestions_origin",
+        ),
+        # Фильтр ?group_key= и агрегат групп редактора; одиночные правки ключа не имеют.
+        Index(
+            "ix_suggestions_job_group",
+            "analysis_job_id",
+            "group_key",
+            postgresql_where=sa.text("group_key IS NOT NULL"),
+        ),
         Index(
             "ix_suggestions_decided_by",
             "decided_by",
@@ -76,6 +87,12 @@ class Suggestion(Base):
     # Номер правки в ответе конвейера. Правки одного анализа вставляются одной транзакцией
     # с одинаковым created_at, и без position их порядок задавал бы случайный uuid.
     position: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # Общий ключ правок одной фразы (suggestion_groups.group_key); NULL — у правки нет пары.
+    group_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Строка с CHECK, а не enum PostgreSQL: новое значение не потребует ALTER TYPE.
+    origin: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="model", server_default="model"
+    )
     change_type: Mapped[ChangeType] = mapped_column(
         sa.Enum(ChangeType, name="change_type", values_callable=_values),
         nullable=False,

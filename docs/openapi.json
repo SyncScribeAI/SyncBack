@@ -1984,7 +1984,7 @@
           "suggestions"
         ],
         "summary": "List Suggestions",
-        "description": "Список правок документа с опциональной фильтрацией по статусу.",
+        "description": "Список правок документа с опциональной фильтрацией по статусу и группе.",
         "operationId": "list_suggestions_api_v1_projects__project_id__documents__document_id__suggestions_get",
         "security": [
           {
@@ -2052,6 +2052,25 @@
               "title": "Status"
             },
             "description": "Фильтр по статусу правки. Допустимые значения: pending, accepted, rejected"
+          },
+          {
+            "name": "group_key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 64
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Только правки одной группы (SuggestionResponse.group_key)",
+              "title": "Group Key"
+            },
+            "description": "Только правки одной группы (SuggestionResponse.group_key)"
           }
         ],
         "responses": {
@@ -3710,6 +3729,14 @@
           },
           "permissions": {
             "$ref": "#/components/schemas/EditorPermissions"
+          },
+          "suggestion_groups": {
+            "items": {
+              "$ref": "#/components/schemas/SuggestionGroupResponse"
+            },
+            "type": "array",
+            "title": "Suggestion Groups",
+            "description": "Группы правок текущего анализа независимо от страницы suggestions — для «ещё N таких» без загрузки всех страниц"
           }
         },
         "type": "object",
@@ -4907,6 +4934,30 @@
         "title": "SuggestionDecision",
         "description": "Одно решение в рамках сессии ревью."
       },
+      "SuggestionGroupResponse": {
+        "properties": {
+          "group_key": {
+            "type": "string",
+            "title": "Group Key"
+          },
+          "size": {
+            "type": "integer",
+            "title": "Size"
+          },
+          "pending": {
+            "type": "integer",
+            "title": "Pending"
+          }
+        },
+        "type": "object",
+        "required": [
+          "group_key",
+          "size",
+          "pending"
+        ],
+        "title": "SuggestionGroupResponse",
+        "description": "Группа правок одной фразы: сколько в ней правок и сколько ещё не решено."
+      },
       "SuggestionResponse": {
         "properties": {
           "id": {
@@ -5051,6 +5102,28 @@
             "title": "Position",
             "description": "Номер правки в ответе конвейера внутри одного анализа",
             "default": 0
+          },
+          "group_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Group Key",
+            "description": "Ключ группы правок одной фразы (тип, old_text и new_text без учёта регистра, пробелов и «ё/е»); None — у правки нет пары. Все правки группы: GET …/suggestions?group_key=…"
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "model",
+              "propagated"
+            ],
+            "title": "Origin",
+            "description": "model — правка конвейера; propagated — найдена бэкендом по точному повтору",
+            "default": "model"
           },
           "status": {
             "type": "string",

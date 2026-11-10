@@ -14,8 +14,11 @@ section_ref — название ближайшего предшествующе
 порядковый номер среди сохранённых правок, в порядке ответа конвейера.
 
 start_offset/end_offset — границы original_text в plain_text документа, в символах Python
-(как у блоков редактора). Если фрагмент встречается в блоке несколько раз, берётся первое
-вхождение: так же его ищут экспортёры внутри блока.
+(как у блоков редактора). Если в блоке несколько правок modify/delete с одним old_text,
+вхождения раздаются по порядку ответа: курсор по (блок, old_text) сдвигается за найденное
+вхождение. Правка сверх числа вхождений отбрасывается — иначе две правки легли бы на
+одно место. Добавления с общим якорем курсор не сдвигают: несколько абзацев после одного
+якоря — законный ответ.
 
 Атрибуции правки к источнику в контракте нет, поэтому источники правки задача анализа
 заполняет всеми источниками, ушедшими в запрос.
@@ -36,6 +39,7 @@ from app.domain.interfaces.document_analyzer import (
     ProposedChange,
 )
 from app.domain.interfaces.document_parser import DocumentBlockType
+from app.domain.value_objects import SuggestionOriginVO
 
 NO_SECTION = "Без раздела"
 # Длина колонки suggestions.section_ref.
@@ -55,6 +59,8 @@ class SuggestionDraft:
     position: int
     start_offset: int
     end_offset: int
+    group_key: str | None = None
+    origin: SuggestionOriginVO = SuggestionOriginVO.MODEL
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,16 +83,17 @@ class MappedResult:
 
 
 @dataclass(frozen=True, slots=True)
-class _BlockContext:
+class BlockContext:
     block: BlockPayload
     section_ref: str
 
 
 def map_result(result: AnalysisResult, blocks: Iterable[BlockPayload]) -> MappedResult:
-    index = _index_blocks(blocks)
+    index = index_blocks(blocks)
     mapped = MappedResult()
+    cursors: dict[tuple[str, str], int] = {}
     for change in result.suggestions:
-        draft_or_reason = _to_suggestion(change, index, len(mapped.suggestions))
+        draft_or_reason = _to_suggestion(change, index, cursors, len(mapped.suggestions))
         if isinstance(draft_or_reason, str):
             mapped.dropped[draft_or_reason] = mapped.dropped.get(draft_or_reason, 0) + 1
         else:
@@ -115,19 +122,22 @@ def map_result(result: AnalysisResult, blocks: Iterable[BlockPayload]) -> Mapped
     return mapped
 
 
-def _index_blocks(blocks: Iterable[BlockPayload]) -> dict[str, _BlockContext]:
+def index_blocks(blocks: Iterable[BlockPayload]) -> dict[str, BlockContext]:
     """ref → блок и его раздел за один проход: раздел — последний встреченный заголовок."""
-    index: dict[str, _BlockContext] = {}
+    index: dict[str, BlockContext] = {}
     section = NO_SECTION
     for block in blocks:
         if block.type is DocumentBlockType.HEADING:
             section = heading_title(block.text)[:_SECTION_REF_MAX] or NO_SECTION
-        index[block.ref] = _BlockContext(block, section)
+        index[block.ref] = BlockContext(block, section)
     return index
 
 
 def _to_suggestion(
-    change: ProposedChange, index: dict[str, _BlockContext], position: int
+    change: ProposedChange,
+    index: dict[str, BlockContext],
+    cursors: dict[tuple[str, str], int],
+    position: int,
 ) -> SuggestionDraft | str:
     """Черновик правки или причина отброса."""
     if change.kind not in _KNOWN_KINDS:
@@ -156,9 +166,12 @@ def _to_suggestion(
         original = change.old_text or ""
         if not original.strip():
             return "old_text_missing"
-        found_at = context.block.text.find(original)
+        key = (change.block_ref, original)
+        cursor = cursors.get(key, 0)
+        found_at = context.block.text.find(original, cursor)
         if found_at < 0:
-            return "old_text_not_in_block"
+            return "old_text_occurrences_exhausted" if cursor else "old_text_not_in_block"
+        cursors[key] = found_at + len(original)
     start = context.block.start_offset + found_at
     return SuggestionDraft(
         block_ref=change.block_ref,

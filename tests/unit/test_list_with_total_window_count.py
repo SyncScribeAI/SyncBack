@@ -79,11 +79,14 @@ class _FakeSuggestionRepo:
         limit: int,
         offset: int,
         status: SuggestionStatusVO | None = None,
+        group_key: str | None = None,
     ) -> tuple[list[SuggestionProtocol], int]:
         matching = [
             s
             for s in self._all
-            if s.analysis_job_id == analysis_job_id and (status is None or s.status == status)
+            if s.analysis_job_id == analysis_job_id
+            and (status is None or s.status == status)
+            and (group_key is None or s.group_key == group_key)
         ]
         total = len(matching)
         items = matching[offset : offset + limit]

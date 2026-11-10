@@ -118,6 +118,42 @@ class Settings(BaseSettings):
             raise ValueError(f"LLM_API_KEY обязателен для LLM_AUTH={self.llm_auth}")
         return self
 
+    # Анализ по контракту ML 2.0. legacy_llm — прежний конвейер «документ × источник» через
+    # LLMClient; остальные провайдеры отправляют документ целиком в DocumentAnalyzer.
+    analysis_provider: Literal["legacy_llm", "ml_plugin", "ml_http", "stub"] = "legacy_llm"
+    ml_plugin_entrypoint: str = ""
+    ml_endpoint: str = ""
+    ml_health_url: str = ""
+    ml_api_key: str = ""
+    ml_http_mode: Literal["sync", "async"] = "sync"
+    ml_poll_seconds: float = Field(default=5.0, gt=0)
+    ml_wait_seconds: int = Field(default=1500, gt=0)
+    ml_max_retries: int = Field(default=3, ge=0)
+    analysis_task_time_limit_seconds: int = Field(default=1800, gt=0)
+    analysis_retry_limit: int = Field(default=3, ge=0)
+    analysis_max_blocks: int = Field(default=1000, gt=0)
+    analysis_max_block_chars: int = Field(default=20_000, gt=0)
+    analysis_max_source_chars: int = Field(default=200_000, gt=0)
+    analysis_max_sources: int = Field(default=20, gt=0)
+    analysis_source_fetch_concurrency: int = Field(default=4, gt=0)
+    analysis_store_payloads: bool = False
+    suggestion_low_confidence_threshold: float = Field(default=0.7, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _validate_analysis(self) -> "Settings":
+        if self.analysis_provider == "ml_plugin" and ":" not in self.ml_plugin_entrypoint:
+            raise ValueError(
+                "ML_PLUGIN_ENTRYPOINT обязателен для ANALYSIS_PROVIDER=ml_plugin "
+                "в виде package.module:function"
+            )
+        if self.analysis_provider == "ml_http" and not self.ml_endpoint:
+            raise ValueError("ML_ENDPOINT обязателен для ANALYSIS_PROVIDER=ml_http")
+        # Дедлайн ожидания ML меньше лимита задачи: иначе Celery прервёт задачу раньше,
+        # чем адаптер вернёт понятную ошибку, и запас уйдёт на загрузку источников и запись.
+        if self.ml_wait_seconds >= self.analysis_task_time_limit_seconds:
+            raise ValueError("ML_WAIT_SECONDS должен быть меньше ANALYSIS_TASK_TIME_LIMIT_SECONDS")
+        return self
+
     @model_validator(mode="after")
     def _forbid_deployment_placeholders(self) -> "Settings":
         """Внешние окружения не должны запускаться с примерами из .env.example."""
@@ -141,6 +177,8 @@ class Settings(BaseSettings):
             and _is_placeholder_secret(self.llm_api_key)
         ):
             unsafe_fields.append("LLM_API_KEY")
+        if self.analysis_provider == "ml_http" and _is_placeholder_secret(self.ml_api_key):
+            unsafe_fields.append("ML_API_KEY")
 
         if unsafe_fields:
             names = ", ".join(unsafe_fields)

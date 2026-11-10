@@ -4,6 +4,7 @@
 правка и каким будет статус задачи, не должны зависеть от устройства harness.
 """
 
+import gc
 import time
 import tracemalloc
 import uuid
@@ -284,16 +285,28 @@ def _big_case(blocks: int, changes: int) -> tuple[DocumentInput, AnalysisResult]
     return document, result
 
 
+def _timed_build_and_map(document: DocumentInput, result: AnalysisResult, expected: int) -> float:
+    # В полном прогоне под coverage куча велика, и проходы GC по ней зависят от числа
+    # тестов, а не от входа замера; минимум из нескольких прогонов отсекает шум раннера.
+    gc.collect()
+    gc.disable()
+    try:
+        started = time.perf_counter()
+        request = build_analysis_request(job_id=JOB_ID, attempt=0, document=document, sources=[])
+        mapped = map_result(result, request.document.blocks)
+        elapsed = time.perf_counter() - started
+    finally:
+        gc.enable()
+    assert len(mapped.suggestions) == expected
+    return elapsed
+
+
 @pytest.mark.perf
 def test_builder_and_mapper_scale_linearly_with_bounded_memory() -> None:
     timings = []
     for scale in (1, 4):
         document, result = _big_case(2000 * scale, 500 * scale)
-        started = time.perf_counter()
-        request = build_analysis_request(job_id=JOB_ID, attempt=0, document=document, sources=[])
-        mapped = map_result(result, request.document.blocks)
-        timings.append(time.perf_counter() - started)
-        assert len(mapped.suggestions) == 500 * scale
+        timings.append(min(_timed_build_and_map(document, result, 500 * scale) for _ in range(3)))
     # Квадратичный код дал бы ×16; запас на шум CI.
     assert timings[1] < timings[0] * 8
 

@@ -1,0 +1,13 @@
+{
+  "contract_version": "2.0",
+  "request_id": "22222222-2222-4222-8222-222222222222:0",
+  "analysis_job_id": "22222222-2222-4222-8222-222222222222",
+  "status": "failed",
+  "suggestions": [],
+  "flags": [],
+  "meta": {},
+  "error": {
+    "code": "invalid_request",
+    "message": "нет source (или sources)"
+  }
+}

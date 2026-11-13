@@ -25,6 +25,7 @@ from app.domain.analysis_health import AnalysisHealth
 from app.domain.interfaces.analysis_queue import AnalysisQueue
 from app.domain.interfaces.llm_client import LLMClient
 from app.domain.services.document_service import FORMAT_BY_EXTENSION
+from app.domain.source_files import SOURCE_FILE_EXTENSIONS
 from app.domain.value_objects import DocumentStatusVO
 from app.infrastructure.db.models.user import User
 from app.infrastructure.ml_pipeline.factory import contract_version
@@ -89,6 +90,7 @@ async def get_capabilities(settings: Settings = Depends(get_settings)) -> Capabi
             max_size_bytes=settings.max_upload_size_bytes,
             document_formats=sorted({f.value for f in FORMAT_BY_EXTENSION.values()}),
             document_extensions=sorted(FORMAT_BY_EXTENSION),
+            source_extensions=list(SOURCE_FILE_EXTENSIONS),
             unsupported_extensions=[".doc"],
         ),
         analysis=AnalysisCapabilities(

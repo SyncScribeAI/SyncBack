@@ -6,7 +6,7 @@
 от формата файла, а сравнение «документ ↔ источник» опирается на одинаковую разметку.
 """
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,10 +18,25 @@ _BLOCK_SEPARATOR = "\n\n"
 
 
 @dataclass(frozen=True, slots=True)
+class FragmentPart:
+    """Часть фрагмента со своим местом в файле, например строка таблицы.
+
+    start и end отсчитываются от начала text фрагмента. Части нужны, когда фрагмент
+    велик: таблица PDF может занимать несколько страниц, и основание из одной строки
+    должно подсвечивать эту строку, а не всю таблицу.
+    """
+
+    start: int
+    end: int
+    locator: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
 class SourceFragment:
     type: DocumentBlockType
     text: str
     heading_level: int | None = None
+    parts: tuple[FragmentPart, ...] = ()
 
 
 def serialize_source(fragments: Iterable[SourceFragment]) -> str:
@@ -49,6 +64,27 @@ class FragmentSpan:
     start: int
     end: int
     locator: Mapping[str, Any]
+    # Части в координатах текста источника, упорядочены по start.
+    parts: tuple["FragmentSpan", ...] = ()
+
+    def locator_for(self, start: int, end: int) -> Mapping[str, Any]:
+        """Место диапазона [start, end) в файле: части, которые он задевает, или весь фрагмент.
+
+        Локаторы нескольких частей объединяются, если у них одинаковые ключи, а
+        различаются только списки; иначе возвращается локатор фрагмента. O(P) по числу
+        частей одного фрагмента: оснований у правки единицы, частей не больше строк таблицы.
+        """
+        if not self.parts:
+            return self.locator
+        touched: list[Mapping[str, Any]] = []
+        for part in self.parts:
+            if part.start >= max(end, start + 1):
+                break
+            if part.end > start:
+                touched.append(part.locator)
+        if not touched:
+            return self.locator
+        return _merge_locators(touched) or self.locator
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,9 +114,56 @@ def serialize_source_layout(
             offset += len(_BLOCK_SEPARATOR)
         formatted = _format(fragment.type, text, fragment.heading_level)
         parts.append(formatted)
-        spans.append(FragmentSpan(offset, offset + len(formatted), locator))
+        spans.append(
+            FragmentSpan(
+                offset,
+                offset + len(formatted),
+                locator,
+                _shifted_parts(fragment, text, formatted, offset),
+            )
+        )
         offset += len(formatted)
     return SourceLayout(_BLOCK_SEPARATOR.join(parts), tuple(spans))
+
+
+def _shifted_parts(
+    fragment: SourceFragment, text: str, formatted: str, offset: int
+) -> tuple[FragmentSpan, ...]:
+    """Части в координатах текста источника.
+
+    Заголовок при форматировании сворачивает пробелы, и смещения частей в нём теряют
+    смысл, поэтому части берутся только у фрагментов, чей текст входит в формат целиком.
+    """
+    if not fragment.parts:
+        return ()
+    inner = formatted.find(text)
+    if inner < 0:
+        return ()
+    shift = offset + inner - (len(fragment.text) - len(fragment.text.lstrip()))
+    limit = offset + inner + len(text)
+    return tuple(
+        FragmentSpan(max(shift + part.start, offset), min(shift + part.end, limit), part.locator)
+        for part in fragment.parts
+        if shift + part.end > offset + inner and shift + part.start < limit
+    )
+
+
+def _merge_locators(locators: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    first = locators[0]
+    if len(locators) == 1:
+        return first
+    if any(locator.keys() != first.keys() for locator in locators):
+        return None
+    merged: dict[str, Any] = {}
+    for key, value in first.items():
+        values = [locator[key] for locator in locators]
+        if all(isinstance(item, list) for item in values):
+            merged[key] = [entry for item in values for entry in item]
+        elif all(item == value for item in values):
+            merged[key] = value
+        else:
+            return None
+    return merged
 
 
 def _format(block_type: DocumentBlockType, text: str, heading_level: int | None) -> str:

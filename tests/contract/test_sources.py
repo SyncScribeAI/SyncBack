@@ -65,12 +65,12 @@ async def test_create_sources_of_all_kinds_and_list(
     response = await client.post(
         f"{base}/file",
         data={"name": "Файл"},
-        files={"file": ("../../etc/passwd", b"root", "text/plain")},
+        files={"file": ("../../etc/passwd.txt", b"root", "text/plain")},
         headers=headers,
     )
     assert response.status_code == 201, response.text
     file_source = response.json()
-    assert file_storage.files[f"projects/{project_id}/sources/{file_source['id']}"] == b"root"
+    assert file_storage.files[f"projects/{project_id}/sources/{file_source['id']}.txt"] == b"root"
 
     response = await client.get(base, headers=headers)
     assert response.status_code == 200, response.text

@@ -30,9 +30,11 @@ from app.domain.exceptions import (
 )
 from app.domain.interfaces.document_parser import IDocumentParserRegistry
 from app.domain.interfaces.file_storage import FileStorage, UploadContent
+from app.domain.interfaces.source_file_inspector import SourceFileInspector
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.lifecycle import DocumentLifecycle
 from app.domain.policies import UploadLimits
+from app.domain.source_files import SourceFileReport, ensure_source_extension
 from app.domain.source_url import SourceUrl
 from app.domain.storage_keys import source_storage_key
 from app.domain.value_objects import SourceScopeVO, SourceTypeVO
@@ -52,11 +54,13 @@ class SourceService:
         file_storage: FileStorage,
         upload_limits: UploadLimits,
         parser_registry: IDocumentParserRegistry | None = None,
+        file_inspector: SourceFileInspector | None = None,
     ) -> None:
         self._uow = uow
         self._storage = file_storage
         self._upload_limits = upload_limits
         self._parser_registry = parser_registry
+        self._file_inspector = file_inspector
 
     @staticmethod
     def _assert_sources_mutable(document: Document) -> None:
@@ -148,8 +152,15 @@ class SourceService:
         content: UploadContent,
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
         document_id: uuid.UUID | None = None,
-    ) -> Source:
-        return await self._create_stored_source(
+    ) -> tuple[Source, SourceFileReport]:
+        """Файл проверяется до записи: отказ не оставляет в хранилище ничего."""
+        ensure_source_extension(filename)
+        if self._upload_limits.exceeded_by(content.size):
+            raise FileTooLargeError(f"Файл превышает лимит {self._upload_limits.max_size_mb} МБ")
+        report = SourceFileReport()
+        if self._file_inspector is not None:
+            report = await self._file_inspector.inspect(filename, content)
+        source = await self._create_stored_source(
             project,
             name=name,
             filename=filename,
@@ -158,6 +169,7 @@ class SourceService:
             document_id=document_id,
             too_large_message=f"Файл превышает лимит {self._upload_limits.max_size_mb} МБ",
         )
+        return source, report
 
     async def _create_stored_source(
         self,

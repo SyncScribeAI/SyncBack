@@ -58,6 +58,7 @@ from app.infrastructure.exporters.exporter_registry import DocumentExporterRegis
 from app.infrastructure.llm.factory import get_llm_client
 from app.infrastructure.ml_pipeline.factory import pipeline_health_check
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
+from app.infrastructure.parsers.source_file_inspector import ParserSourceFileInspector
 from app.infrastructure.queue.celery_analysis_queue import CeleryAnalysisQueue
 from app.infrastructure.security.jwt_handler import JWTHandler
 from app.infrastructure.security.login_rate_limiter import LoginRateLimiter
@@ -77,7 +78,7 @@ def _get_file_storage() -> S3FileStorage:
 
 @lru_cache
 def _get_parser_registry() -> DocumentParserRegistry:
-    return DocumentParserRegistry()
+    return DocumentParserRegistry(pdf_max_pages=get_settings().pdf_max_pages)
 
 
 @lru_cache
@@ -177,6 +178,7 @@ def get_source_service(
         file_storage=_get_file_storage(),
         upload_limits=UploadLimits.from_megabytes(settings.max_upload_size_mb),
         parser_registry=_get_parser_registry(),
+        file_inspector=ParserSourceFileInspector(settings.pdf_max_pages),
     )
 
 

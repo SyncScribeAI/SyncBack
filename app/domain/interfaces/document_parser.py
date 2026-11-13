@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     # source_text сам импортирует DocumentBlockType отсюда.
+    from app.domain.interfaces.document_geometry import DocumentGeometry
     from app.domain.source_text import SourceLayout
 
 
@@ -82,3 +83,7 @@ class IDocumentParserRegistry(Protocol):
     def extract_source_text(self, filename: str, raw_bytes: bytes) -> str: ...
 
     def extract_source_layout(self, filename: str, raw_bytes: bytes) -> "SourceLayout": ...
+
+    def geometry_for(self, filename: str) -> "DocumentGeometry | None":
+        """Перевод текста в прямоугольники страниц; None для форматов без вёрстки."""
+        ...

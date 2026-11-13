@@ -34,6 +34,7 @@ from app.domain.interfaces.analysis_queue import AnalysisQueue
 from app.domain.interfaces.dashboard_query_service import IDashboardQueryService
 from app.domain.interfaces.event_publisher import IEventPublisher
 from app.domain.interfaces.llm_client import LLMClient
+from app.domain.interfaces.source_connector import SourceConnector, SourceKind
 from app.domain.policies import UploadLimits
 from app.domain.services.analysis_flag_service import AnalysisFlagService
 from app.domain.services.analysis_job_service import AnalysisJobService
@@ -62,6 +63,8 @@ from app.infrastructure.security.jwt_handler import JWTHandler
 from app.infrastructure.security.login_rate_limiter import LoginRateLimiter
 from app.infrastructure.security.password_hasher import PasswordHasher
 from app.infrastructure.security.refresh_token_store import RefreshTokenStore
+from app.infrastructure.source_connectors.manual_upload_connector import ManualUploadConnector
+from app.infrastructure.source_connectors.url_connector import UrlConnector, build_url_connector
 from app.infrastructure.storage.s3_storage import S3FileStorage
 
 # ---------------------------------------------------------------------------
@@ -77,6 +80,17 @@ def _get_file_storage() -> S3FileStorage:
 @lru_cache
 def _get_parser_registry() -> DocumentParserRegistry:
     return DocumentParserRegistry()
+
+
+@lru_cache
+def _get_url_connector() -> UrlConnector:
+    return build_url_connector(get_settings())
+
+
+def _connector_for(kind: SourceKind) -> SourceConnector:
+    if kind is SourceKind.URL:
+        return _get_url_connector()
+    return ManualUploadConnector(_get_file_storage(), _get_parser_registry())
 
 
 @lru_cache
@@ -176,6 +190,9 @@ def get_source_service(
         file_storage=_get_file_storage(),
         upload_limits=UploadLimits.from_megabytes(settings.max_upload_size_mb),
         parser_registry=_get_parser_registry(),
+        url_policy=settings.source_url_policy,
+        connector_for=_connector_for,
+        max_source_chars=settings.analysis_max_source_chars,
     )
 
 

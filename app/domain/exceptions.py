@@ -46,6 +46,16 @@ class SourceFetchError(DomainError):
     """Содержимое источника по ссылке получить не удалось: редиректы, размер, ответ сервера."""
 
 
+class SourceRequiresAuthError(SourceFetchError):
+    """Страница по ссылке открывается только после входа пользователя."""
+
+    def __init__(
+        self,
+        message: str = "Страница требует входа. Сохраните её как файл и загрузите как источник",
+    ) -> None:
+        super().__init__(message)
+
+
 class FileTooLargeError(DomainError):
     pass
 

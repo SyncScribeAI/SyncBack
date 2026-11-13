@@ -16,7 +16,7 @@ from app.infrastructure.db.models.source import Source
 from app.infrastructure.events.publishers import RedisEventPublisher
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 from app.infrastructure.source_connectors.manual_upload_connector import ManualUploadConnector
-from app.infrastructure.source_connectors.url_connector import UrlConnector
+from app.infrastructure.source_connectors.url_connector import UrlConnector, build_url_connector
 from app.infrastructure.storage.s3_storage import S3FileStorage
 
 
@@ -37,7 +37,7 @@ def _get_manual_connector() -> ManualUploadConnector:
 
 @functools.cache
 def _get_url_connector() -> UrlConnector:
-    return UrlConnector()
+    return build_url_connector(get_settings())
 
 
 def get_connector_for(source_kind: SourceKind) -> SourceConnector:

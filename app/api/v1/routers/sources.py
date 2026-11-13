@@ -6,6 +6,7 @@ POST /projects/{id}/sources/file            — загрузить файл
 GET  /projects/{id}/sources                 — список с пагинацией
 GET  /projects/{id}/sources/{sid}/file      — исходный файл (см. source_files.py)
 GET  /projects/{id}/sources/{sid}/content   — текст для просмотра
+POST /projects/{id}/sources/{sid}/check     — пробная загрузка и разбор без сохранения
 DEL  /projects/{id}/sources/{sid}           — удалить источник
 
 Правила «можно ли менять источники документа» живут в SourceService:
@@ -24,6 +25,7 @@ from app.api.deps import get_allowed_project
 from app.api.schemas.pagination import Page
 from app.api.schemas.source import (
     NoteCreateRequest,
+    SourceCheckResponse,
     SourceContentResponse,
     SourceCreateRequest,
     SourceResponse,
@@ -211,6 +213,24 @@ async def get_source_content(
             update={"reason": "Файл не удалось прочитать как текст — скачайте его"}
         )
     return base.model_copy(update={"plain_text": text, "preview_available": True})
+
+
+@router.post("/{source_id}/check", response_model=SourceCheckResponse)
+async def check_source(
+    source_id: uuid.UUID,
+    project: Project = Depends(get_allowed_project),
+    source_service: SourceService = Depends(get_source_service),
+) -> SourceCheckResponse:
+    """Загрузить и разобрать источник так же, как это сделает анализ.
+
+    Отказ загрузки приходит в ответе 200 с ok=false и текстом в error: фронтенд
+    показывает его сразу после добавления ссылки.
+    """
+    try:
+        result = await source_service.check_source(project.id, source_id)
+    except _SOURCE_ERRORS as exc:
+        raise _to_http(exc) from exc
+    return SourceCheckResponse(ok=result.ok, chars=result.chars, error=result.error)
 
 
 @router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT)

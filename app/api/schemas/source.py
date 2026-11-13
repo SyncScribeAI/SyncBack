@@ -91,3 +91,11 @@ class SourceContentResponse(BaseModel):
     reason: str | None = None
 
     _normalise_type = field_validator("type", mode="before")(_enum_value)
+
+
+class SourceCheckResponse(BaseModel):
+    """Итог пробной загрузки источника: ничего не сохраняется."""
+
+    ok: bool
+    chars: int
+    error: str | None = None

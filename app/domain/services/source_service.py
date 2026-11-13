@@ -11,6 +11,10 @@
 Просмотр — текст файла через реестр парсеров. Скачивание исходного файла идёт через
 SourceFileService: байты отдаются авторизованным API, публичный адрес хранилища не нужен.
 Для url-источника открывается сам адрес.
+
+Проверка источника загружает и разбирает его тем же коннектором, что и воркер, и
+ничего не сохраняет: пользователь узнаёт об отказе сразу после добавления ссылки,
+а не после запуска анализа.
 """
 
 from __future__ import annotations
@@ -18,10 +22,12 @@ from __future__ import annotations
 import logging
 import uuid
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from app.domain.exceptions import (
     DocumentNotFoundError,
+    DomainError,
     FileTooLargeError,
     InvalidSourceScopeError,
     SourceLockError,
@@ -30,10 +36,11 @@ from app.domain.exceptions import (
 )
 from app.domain.interfaces.document_parser import IDocumentParserRegistry
 from app.domain.interfaces.file_storage import FileStorage, UploadContent
+from app.domain.interfaces.source_connector import SourceConnectorResolver, SourceKind, SourceRef
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.lifecycle import DocumentLifecycle
 from app.domain.policies import UploadLimits
-from app.domain.source_url import SourceUrl
+from app.domain.source_url import DEFAULT_SOURCE_URL_POLICY, SourceUrl, SourceUrlPolicy
 from app.domain.storage_keys import source_storage_key
 from app.domain.value_objects import SourceScopeVO, SourceTypeVO
 
@@ -44,6 +51,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("syncscribe.sources")
 
+_SOURCE_KINDS = {SourceTypeVO.FILE.value: SourceKind.FILE, SourceTypeVO.URL.value: SourceKind.URL}
+
+
+@dataclass(frozen=True, slots=True)
+class SourceCheckResult:
+    """Итог пробной загрузки: ok и длина текста либо понятная причина отказа."""
+
+    ok: bool
+    chars: int
+    error: str | None = None
+
 
 class SourceService:
     def __init__(
@@ -52,11 +70,17 @@ class SourceService:
         file_storage: FileStorage,
         upload_limits: UploadLimits,
         parser_registry: IDocumentParserRegistry | None = None,
+        url_policy: SourceUrlPolicy = DEFAULT_SOURCE_URL_POLICY,
+        connector_for: SourceConnectorResolver | None = None,
+        max_source_chars: int | None = None,
     ) -> None:
         self._uow = uow
         self._storage = file_storage
         self._upload_limits = upload_limits
         self._parser_registry = parser_registry
+        self._url_policy = url_policy
+        self._connector_for = connector_for
+        self._max_source_chars = max_source_chars
 
     @staticmethod
     def _assert_sources_mutable(document: Document) -> None:
@@ -108,7 +132,7 @@ class SourceService:
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
         document_id: uuid.UUID | None = None,
     ) -> Source:
-        source_url = SourceUrl.parse(url)
+        source_url = SourceUrl.parse(url, self._url_policy)
         async with self._uow:
             document = await self._target_document(project.id, scope, document_id)
             source = await self._uow.sources.create_url(
@@ -303,3 +327,48 @@ class SourceService:
             raise UnsupportedFormatError("Просмотр источников не настроен")
         raw_bytes = await self._storage.download(source.storage_key)
         return self._parser_registry.extract_text(source.storage_key, raw_bytes)
+
+    # ------------------------------------------------------------------
+    # Проверка
+    # ------------------------------------------------------------------
+
+    async def check_source(self, project_id: uuid.UUID, source_id: uuid.UUID) -> SourceCheckResult:
+        """Загружает и разбирает источник, как это сделает воркер, ничего не сохраняя.
+
+        Ожидаемые отказы (адрес вне списка, вход, размер, формат) возвращаются в error.
+        Непредвиденная ошибка коннектора тоже даёт ok=False: ручка служит подсказкой,
+        а подробности остаются в логе.
+        """
+        source = await self.get_source(project_id, source_id)
+        if self._connector_for is None:
+            raise UnsupportedFormatError("Проверка источников не настроена")
+        kind = _SOURCE_KINDS.get(source.type.value)
+        if kind is None:
+            raise UnsupportedFormatError(f"Неизвестный тип источника: {source.type.value}")
+        ref = SourceRef(
+            id=source.id,
+            name=source.name,
+            type=kind,
+            storage_key=source.storage_key,
+            url=source.url,
+            uploaded_at=source.created_at,
+        )
+        try:
+            text = await self._connector_for(kind).fetch_structured(ref)
+        except DomainError as exc:
+            return SourceCheckResult(ok=False, chars=0, error=str(exc))
+        except Exception:
+            logger.exception(
+                "Проверка источника завершилась ошибкой", extra={"source_id": str(source_id)}
+            )
+            return SourceCheckResult(ok=False, chars=0, error="Источник не удалось загрузить")
+        chars = len(text)
+        if self._max_source_chars is not None and chars > self._max_source_chars:
+            return SourceCheckResult(
+                ok=False,
+                chars=chars,
+                error=f"Источник больше лимита: {chars} символов при допустимых {self._max_source_chars}",
+            )
+        if not text.strip():
+            return SourceCheckResult(ok=False, chars=0, error="В источнике не найден текст")
+        return SourceCheckResult(ok=True, chars=chars)

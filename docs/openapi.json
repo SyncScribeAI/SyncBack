@@ -1554,6 +1554,65 @@
         }
       }
     },
+    "/api/v1/projects/{project_id}/sources/{source_id}/check": {
+      "post": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Check Source",
+        "description": "Загрузить и разобрать источник так же, как это сделает анализ.\n\nОтказ загрузки приходит в ответе 200 с ok=false и текстом в error: фронтенд\nпоказывает его сразу после добавления ссылки.",
+        "operationId": "check_source_api_v1_projects__project_id__sources__source_id__check_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Source Id"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceCheckResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project_id}/sources/{source_id}": {
       "delete": {
         "tags": [
@@ -5140,6 +5199,36 @@
         ],
         "title": "SourceBadge",
         "description": "Минимум для строки источника на карточке документа: название, тип, адрес, дата."
+      },
+      "SourceCheckResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "chars": {
+            "type": "integer",
+            "title": "Chars"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "chars"
+        ],
+        "title": "SourceCheckResponse",
+        "description": "Итог пробной загрузки источника: ничего не сохраняется."
       },
       "SourceContentResponse": {
         "properties": {

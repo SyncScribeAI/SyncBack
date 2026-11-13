@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
 
+from app.domain.evidence import Quote
 from app.domain.interfaces.document_parser import DocumentBlockType
 from app.domain.interfaces.source_connector import SourceKind
 
@@ -89,12 +90,12 @@ class ProposedChange:
     anchor_text: str | None = None
     rationale: str | None = None
     confidence: float | None = None
+    # Цитаты источников, на которые опирается правка; пусто, если их не удалось извлечь.
+    quotes: tuple[Quote, ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
-class FlagQuote:
-    source_name: str
-    text: str
+# Цитата флага и цитата правки устроены одинаково и проходят через один локатор.
+FlagQuote = Quote
 
 
 @dataclass(frozen=True, slots=True)

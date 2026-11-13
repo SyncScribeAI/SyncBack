@@ -7,6 +7,7 @@ from app.domain.interfaces.document_parser import (
     ParsedBlock,
     ParsedDocument,
 )
+from app.domain.source_text import SourceLayout
 from app.domain.text_normalization import normalize_text
 from app.infrastructure.parsers.line_scanner import iter_lines
 
@@ -27,6 +28,9 @@ class MarkdownParser:
     def extract_source_text(self, raw_bytes: bytes) -> str:
         """Markdown уже в формате источника: разметка сохраняется как есть."""
         return self.extract_text(raw_bytes)
+
+    def extract_source_layout(self, raw_bytes: bytes) -> SourceLayout:
+        return SourceLayout(self.extract_source_text(raw_bytes))
 
     def extract_text(self, raw_bytes: bytes) -> str:
         return normalize_text(raw_bytes.decode("utf-8", errors="replace"))

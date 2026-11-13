@@ -4,6 +4,7 @@ from pathlib import Path
 
 from app.domain.exceptions import UnsupportedFormatError
 from app.domain.interfaces.document_parser import DocumentParser, ParsedDocument
+from app.domain.source_text import SourceLayout
 from app.infrastructure.parsers.docx_parser import DocxParser
 from app.infrastructure.parsers.markdown_parser import MarkdownParser
 from app.infrastructure.parsers.txt_parser import TxtParser
@@ -53,6 +54,9 @@ class DocumentParserRegistry:
 
     def extract_source_text(self, filename: str, raw_bytes: bytes) -> str:
         return self._parser_for(filename).extract_source_text(raw_bytes)
+
+    def extract_source_layout(self, filename: str, raw_bytes: bytes) -> SourceLayout:
+        return self._parser_for(filename).extract_source_layout(raw_bytes)
 
     def _parser_for(self, filename: str) -> DocumentParser:
         suffix = Path(filename).suffix.lower()

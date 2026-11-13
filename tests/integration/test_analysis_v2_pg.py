@@ -29,6 +29,7 @@ from app.domain.interfaces.document_analyzer import (
     ReviewFlag,
 )
 from app.domain.interfaces.source_connector import SourceRef
+from app.domain.source_text import SourceLayout
 from app.infrastructure.db.models.analysis_flag import AnalysisFlag
 from app.infrastructure.db.models.analysis_job import AnalysisJob
 from app.infrastructure.db.models.audit_log import AuditLog
@@ -90,6 +91,9 @@ class FakeStorage:
 class FakeConnector:
     async def fetch_structured(self, source: SourceRef) -> str:
         return "Текст источника."
+
+    async def fetch_layout(self, source: SourceRef) -> SourceLayout:
+        return SourceLayout(await self.fetch_structured(source))
 
 
 class Silent:

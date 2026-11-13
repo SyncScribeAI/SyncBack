@@ -31,6 +31,7 @@ from app.domain.interfaces.document_analyzer import (
     ProposedChange,
 )
 from app.domain.interfaces.source_connector import SourceRef
+from app.domain.source_text import SourceLayout
 from app.infrastructure.db.models.analysis_job import AnalysisJob
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.suggestion import Suggestion
@@ -107,6 +108,9 @@ class FakeConnector:
         if source.name in self.broken:
             raise ConnectionError("источник недоступен")
         return self.texts.get(source.name, f"Решения: срок ответа 5 рабочих дней ({source.name})")
+
+    async def fetch_layout(self, source: SourceRef) -> SourceLayout:
+        return SourceLayout(await self.fetch_structured(source))
 
 
 @dataclass
@@ -575,6 +579,12 @@ async def test_suggestions_are_bound_to_blocks_and_keep_pipeline_order(
         "contract_version": "2.0",
         "provider": v2._settings.analysis_provider,
         "meta": {"checked_blocks": 2, "errors": 0, "llm_seconds": 1.5},
+        "evidence": {
+            "evidence_exact": 0,
+            "evidence_approximate": 0,
+            "evidence_not_found": 0,
+            "evidence_unparsed": 0,
+        },
     }
 
 
@@ -893,3 +903,65 @@ async def test_retry_reuses_snapshot_objects_and_writes_rows_once(
         assert len((await session.execute(select(SourceSnapshotModel))).scalars().all()) == 1
         rows = (await session.execute(select(AnalysisJobSourceSnapshot))).scalars().all()
     assert [(row.position, row.status) for row in rows] == [(0, "fetched")]
+
+
+def _quoted_deadline(request: AnalysisRequest) -> AnalysisResult:
+    from app.domain.evidence import Quote
+
+    return AnalysisResult(
+        status=AnalysisStatus.COMPLETED,
+        suggestions=(
+            ProposedChange(
+                kind="modify",
+                block_ref=_block_ref(request, "10 рабочих"),
+                old_text="10 рабочих дней",
+                new_text="5 рабочих дней",
+                rationale="Источник: «срок ответа — 5 рабочих дней» (A)",
+                quotes=(
+                    Quote("A", "срок ответа:  5 рабочих дней"),
+                    Quote("A", "этой фразы в источнике нет совсем"),
+                ),
+            ),
+        ),
+    )
+
+
+async def test_suggestion_cites_only_quoted_source_and_shows_evidence(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,  # noqa: F811
+    worker: Worker,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    headers, project_id, document_id, job_id, source_ids = await _start(client, queue, ["A", "B"])
+    worker.analyzer.respond = _quoted_deadline
+    worker.connector.texts = {"A": "# Решения\n\nСрок ответа: 5 рабочих дней.", "B": "Другое"}
+
+    await v2.analyze_document(job_id, source_ids, 0)
+
+    [suggestion] = await _suggestions(sessionmaker)
+    assert [s.name for s in suggestion.sources] == ["A"]
+    job = await _job(sessionmaker, job_id)
+    assert job.pipeline_meta["evidence"] == {
+        "evidence_exact": 1,
+        "evidence_approximate": 0,
+        "evidence_not_found": 1,
+        "evidence_unparsed": 0,
+    }
+
+    response = await client.get(
+        f"/api/v1/projects/{project_id}/documents/{document_id}/suggestions", headers=headers
+    )
+    assert response.status_code == 200, response.text
+    found, missing = response.json()["items"][0]["evidence"]
+    assert (found["source_name"], found["match"]) == ("A", "exact")
+    snapshot = await client.get(
+        f"/api/v1/projects/{project_id}/source-snapshots/{found['snapshot_id']}/content",
+        headers=headers,
+    )
+    text = snapshot.json()["text"]
+    assert text[found["start_offset"] : found["end_offset"]] == "Срок ответа: 5 рабочих дней"
+    assert found["segment_index"] == 1
+    # Заметка не файл .docx, но её storage_key не менялся: оригинал тот же.
+    assert found["original_file_available"] is True
+    assert (missing["match"], missing["start_offset"]) == ("not_found", None)
+    assert "file_storage_key" not in found

@@ -87,7 +87,11 @@ class HttpAnalyzer:
                 del body
                 if response.status_code == 202:
                     response = await self._poll(client, _accepted_id(response, request))
-                return decode_response(response.content, expected_request_id=request.request_id)
+                return decode_response(
+                    response.content,
+                    expected_request_id=request.request_id,
+                    source_names=[source.name for source in request.sources],
+                )
         except TimeoutError:
             raise LLMTimeoutError(f"ML-сервис не ответил за {self._wait_seconds:g} сек.") from None
 

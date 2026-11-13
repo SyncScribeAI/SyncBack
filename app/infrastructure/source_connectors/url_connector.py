@@ -28,7 +28,7 @@ import httpx
 
 from app.domain.exceptions import InvalidSourceUrlError, SourceFetchError
 from app.domain.interfaces.source_connector import SourceKind, SourceMetadata, SourceRef
-from app.domain.source_text import paragraphize, serialize_source
+from app.domain.source_text import SourceLayout, paragraphize, serialize_source
 from app.domain.source_url import IpAddress, SourceUrl, is_public_address
 from app.domain.text_normalization import normalize_text
 from app.infrastructure.source_connectors.html_structure import iter_html_fragments
@@ -94,6 +94,10 @@ class UrlConnector:
     async def fetch_structured(self, source: SourceRef) -> str:
         raw, content_type = await self._fetch_raw(source)
         return self._to_source_text(raw, content_type, source.url or "")
+
+    async def fetch_layout(self, source: SourceRef) -> SourceLayout:
+        # Страница не файл: подсветка идёт по тексту снимка, положения в оригинале нет.
+        return SourceLayout(await self.fetch_structured(source))
 
     async def _fetch_raw(self, source: SourceRef) -> tuple[bytes, str]:
         if not source.url:

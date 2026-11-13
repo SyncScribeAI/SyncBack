@@ -6,7 +6,7 @@ decided_by и decided_at заполняются при решении по пр�
 
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import sqlalchemy as sa
 from sqlalchemy import (
@@ -20,9 +20,10 @@ from sqlalchemy import (
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.domain.evidence import present_evidence
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.models.enums import ChangeType, SuggestionStatus
 
@@ -110,6 +111,9 @@ class Suggestion(Base):
     edited_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     confidence_score: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
+    # Основания правки: цитаты и их место в снимках источников (app.domain.evidence).
+    # None у правок, созданных до оснований, и у правок без цитат.
+    evidence: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
     decided_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
@@ -120,3 +124,10 @@ class Suggestion(Base):
 
     analysis_job: Mapped["AnalysisJob"] = relationship(back_populates="suggestions")
     sources: Mapped[list["Source"]] = relationship(secondary="suggestion_sources", lazy="selectin")
+
+    @property
+    def evidence_view(self) -> list[dict[str, Any]]:
+        """Основания для ответа API. Источники правки уже загружены selectin, поэтому
+        доступность оригинала проверяется без отдельного запроса."""
+        keys = {str(source.id): source.storage_key for source in self.sources}
+        return present_evidence(self.evidence, keys)

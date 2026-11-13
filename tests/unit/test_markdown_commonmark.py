@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import time
 
 import pytest
@@ -167,13 +168,27 @@ def test_blocks_match_legacy_parser_on_compatible_markup(raw: str) -> None:
     ]
 
 
+def _parse_seconds(raw: str) -> float:
+    started = time.perf_counter()
+    blocks = len(_parse(raw).blocks)
+    elapsed = time.perf_counter() - started
+    assert blocks == 5 * raw.count("## Раздел")
+    return elapsed
+
+
 @pytest.mark.perf
 def test_large_document_parses_linearly() -> None:
     unit = "## Раздел\n\nАбзац с **выделением** и `кодом`.\n\n- пункт\n- пункт\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n"
-    raw = unit * (200_000 // len(unit))
-    started = time.perf_counter()
-    parsed = _parse(raw)
-    elapsed = time.perf_counter() - started
-    assert len(parsed.blocks) == 5 * (200_000 // len(unit))
-    # Бюджет с запасом относительно замера 0.28 с на 202 000 символов.
-    assert elapsed < 3.0
+    copies = 40_000 // len(unit)
+    # Абсолютное время зависит от машины и покрытия, поэтому сравнивается рост:
+    # линейный разбор удваивает время, квадратичный учетверяет. Сборщик мусора
+    # выключен, потому что его проходы по куче pytest искажают отношение, а минимум
+    # из трёх замеров отсекает паузы соседних процессов.
+    gc.collect()
+    gc.disable()
+    try:
+        single = min(_parse_seconds(unit * copies) for _ in range(3))
+        double = min(_parse_seconds(unit * 2 * copies) for _ in range(3))
+    finally:
+        gc.enable()
+    assert double / single < 3.0

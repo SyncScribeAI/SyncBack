@@ -17,6 +17,7 @@ Namespace-атрибуты (все объявлены здесь для type-che
   audit       — IAuditLogRepository
   projects    — IProjectRepository
   sources     — ISourceRepository
+  snapshots   — ISourceSnapshotRepository
   users       — IUserRepository
 
 Дашборда в UoW нет: DashboardRepository — read-model, а не агрегат.
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
         IDocumentRepository,
         IProjectRepository,
         ISourceRepository,
+        ISourceSnapshotRepository,
         ISuggestionRepository,
         IUserRepository,
     )
@@ -66,6 +68,7 @@ class IUnitOfWork(ABC):
     # Extended
     projects: IProjectRepository
     sources: ISourceRepository
+    snapshots: ISourceSnapshotRepository
 
     # Auth — HIGH: заменён UserRepository (инфра) на IUserRepository (порт)
     users: IUserRepository

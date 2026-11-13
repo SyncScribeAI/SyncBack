@@ -66,6 +66,14 @@ from app.domain.pipeline_run import PipelineRunSummary, summarize_run
 from app.domain.services.analysis_request_builder import DocumentInput, build_analysis_request
 from app.domain.services.analysis_result_mapper import FlagDraft, SuggestionDraft, map_result
 from app.domain.services.suggestion_groups import PropagationLimits, finalize_drafts
+from app.domain.source_snapshot import (
+    JobSourceRecord,
+    JobSourceStatus,
+    SnapshotDraft,
+    distinct_drafts,
+    fingerprints_storage_key,
+    pack_fingerprints,
+)
 from app.domain.source_text import ensure_source_fits
 from app.domain.value_objects import AnalysisJobStatusVO
 from app.infrastructure.db.session import isolated_uow
@@ -127,6 +135,7 @@ class _JobFailed(Exception):
 @dataclass(frozen=True, slots=True)
 class _StartedJob:
     id: uuid.UUID
+    project_id: uuid.UUID
     document_id: uuid.UUID
     document_name: str
     document_format: str
@@ -134,6 +143,7 @@ class _StartedJob:
     sources: tuple[SourceRef, ...]
     # Источники, которые не удалось даже описать (удалены, неизвестный тип).
     unavailable: tuple[str, ...]
+    unavailable_records: tuple[JobSourceRecord, ...] = ()
 
 
 @dataclass(slots=True)
@@ -141,6 +151,9 @@ class _FetchedSources:
     payloads: list[SourcePayload] = field(default_factory=list)
     ids: list[uuid.UUID] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
+    # Строки задачи в порядке источников запроса и снимки удачно загруженных текстов.
+    records: list[JobSourceRecord] = field(default_factory=list)
+    snapshots: list[SnapshotDraft] = field(default_factory=list)
 
 
 async def analyze_document(
@@ -170,12 +183,14 @@ async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
         await finish(job.id, AnalysisJobStatusVO.SUCCESS)
         return None
     document = await _load_document(job)
-    fetched = await _fetch_sources(job.sources)
+    fetched = await _fetch_sources(job.sources, job.project_id)
     fetched.failed[:0] = job.unavailable
+    fetched.records[:0] = job.unavailable_records
     if not fetched.payloads:
         raise _JobFailed(
             "SOURCES_UNAVAILABLE", "Недоступны все источники: " + ", ".join(fetched.failed)
         )
+    await _store_snapshots(job.id, fetched.snapshots)
     request = _build_request(job, attempt, document, fetched.payloads)
     # Документ больше не нужен: тексты блоков уже в запросе.
     del document
@@ -210,6 +225,8 @@ async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
         flags=flags,
         source_ids=fetched.ids,
         run=run,
+        snapshots=fetched.snapshots,
+        job_sources=_numbered(fetched.records),
     )
     return None
 
@@ -236,23 +253,34 @@ async def _start(job_id: uuid.UUID, source_ids: Sequence[str], attempt: int) -> 
         found = {source.id: source for source in await uow.sources.get_many_by_ids(wanted)}
         refs: list[SourceRef] = []
         unavailable: list[str] = []
+        unavailable_records: list[JobSourceRecord] = []
         for source_id in wanted:
             source = found.get(source_id)
             if source is None:
                 unavailable.append(str(source_id))
+                unavailable_records.append(
+                    _failed_record(None, str(source_id), "unknown", storage_key=None)
+                )
                 continue
             try:
                 refs.append(build_source_ref(source))
             except ValueError:
                 unavailable.append(source.name)
+                unavailable_records.append(
+                    _failed_record(
+                        source.id, source.name, source.type.value, storage_key=source.storage_key
+                    )
+                )
         started = _StartedJob(
             id=job_id,
+            project_id=document.project_id,
             document_id=document.id,
             document_name=document.name,
             document_format=document.format.value,
             storage_key=document.storage_key,
             sources=tuple(refs),
             unavailable=tuple(unavailable),
+            unavailable_records=tuple(unavailable_records),
         )
         await uow.commit()
     return started
@@ -278,7 +306,7 @@ async def _load_document(job: _StartedJob) -> DocumentInput:
     )
 
 
-async def _fetch_sources(refs: Sequence[SourceRef]) -> _FetchedSources:
+async def _fetch_sources(refs: Sequence[SourceRef], project_id: uuid.UUID) -> _FetchedSources:
     """Тексты источников; недоступный источник не роняет задачу, а делает её частичной.
 
     Слишком длинный источник — ошибка всей задачи: без него правки были бы ложными, а
@@ -306,12 +334,92 @@ async def _fetch_sources(refs: Sequence[SourceRef]) -> _FetchedSources:
                 extra={"source_id": str(ref.id), "error_type": type(result).__name__},
             )
             fetched.failed.append(ref.name)
+            fetched.records.append(
+                _failed_record(ref.id, ref.name, ref.type.value, storage_key=ref.storage_key)
+            )
             continue
         fetched.payloads.append(
             SourcePayload(id=str(ref.id), name=ref.name, type=ref.type, text=result)
         )
         fetched.ids.append(ref.id)
+        # Снимок считается от того же текста, что уходит в запрос: цитаты модели
+        # относятся именно к нему.
+        snapshot = SnapshotDraft.of(project_id, result)
+        fetched.snapshots.append(snapshot)
+        fetched.records.append(
+            JobSourceRecord(
+                position=0,
+                source_id=ref.id,
+                name=ref.name,
+                kind=ref.type.value,
+                status=JobSourceStatus.FETCHED,
+                content_hash=snapshot.content_hash,
+                file_storage_key=ref.storage_key,
+            )
+        )
     return fetched
+
+
+def _failed_record(
+    source_id: uuid.UUID | None, name: str, kind: str, *, storage_key: str | None
+) -> JobSourceRecord:
+    return JobSourceRecord(
+        position=0,
+        source_id=source_id,
+        name=name,
+        kind=kind,
+        status=JobSourceStatus.FAILED,
+        file_storage_key=storage_key,
+    )
+
+
+def _numbered(records: Sequence[JobSourceRecord]) -> list[JobSourceRecord]:
+    return [
+        JobSourceRecord(
+            position=position,
+            source_id=record.source_id,
+            name=record.name,
+            kind=record.kind,
+            status=record.status,
+            content_hash=record.content_hash,
+            file_storage_key=record.file_storage_key,
+        )
+        for position, record in enumerate(records)
+    ]
+
+
+async def _store_snapshots(job_id: uuid.UUID, snapshots: Sequence[SnapshotDraft]) -> None:
+    """Текст и отпечатки снимков в хранилище до вызова ML.
+
+    Ключ задан содержимым, поэтому уже записанный снимок не перезаписывается. Без снимка
+    правки нельзя связать с текстом источника, поэтому сбой хранилища завершает задачу.
+    """
+    storage = get_storage()
+    try:
+        for snapshot in distinct_drafts(snapshots):
+            if await storage.exists(snapshot.storage_key):
+                continue
+            await storage.upload(
+                fingerprints_storage_key(snapshot.storage_key),
+                UploadContent.from_bytes(
+                    pack_fingerprints(snapshot.fingerprints), "application/octet-stream"
+                ),
+            )
+            # Текст пишется последним: его наличие означает, что снимок записан целиком.
+            await storage.upload(
+                snapshot.storage_key,
+                UploadContent.from_bytes(
+                    snapshot.text.encode("utf-8"), "text/plain; charset=utf-8"
+                ),
+            )
+    except SoftTimeLimitExceeded:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Анализ v2: снимок источника не сохранён",
+            extra={"job_id": str(job_id), "error_type": type(exc).__name__},
+        )
+        raise _JobFailed("SOURCE_SNAPSHOT_ERROR", "Не удалось сохранить снимок источника") from exc
 
 
 def _build_request(
@@ -436,6 +544,8 @@ async def finish(
     flags: Sequence[FlagDraft] = (),
     source_ids: Sequence[uuid.UUID] = (),
     run: PipelineRunSummary | None = None,
+    snapshots: Sequence[SnapshotDraft] = (),
+    job_sources: Sequence[JobSourceRecord] = (),
 ) -> bool:
     """Записать результат одной транзакцией. False — задача уже не активна, ничего не записано."""
     async with uow_factory() as uow:
@@ -457,6 +567,9 @@ async def finish(
                 to_suggestions(drafts, job_id=job.id, document_id=document.id, sources=sources)
             )
         await uow.flags.bulk_create(to_flags(flags, job_id=job.id, document_id=document.id))
+        if job_sources:
+            snapshot_ids = await uow.snapshots.ensure_snapshots(distinct_drafts(snapshots))
+            await uow.snapshots.add_job_sources(job.id, job_sources, snapshot_ids)
         outbox = await complete_job(
             uow,
             job,

@@ -30,6 +30,9 @@ from app.infrastructure.db.repositories.audit_log_repository import AuditLogRepo
 from app.infrastructure.db.repositories.document_repository import DocumentRepository
 from app.infrastructure.db.repositories.project_repository import ProjectRepository
 from app.infrastructure.db.repositories.source_repository import SourceRepository
+from app.infrastructure.db.repositories.source_snapshot_repository import (
+    SourceSnapshotRepository,
+)
 from app.infrastructure.db.repositories.suggestion_repository import SuggestionRepository
 from app.infrastructure.db.repositories.user_repository import UserRepository
 
@@ -56,6 +59,7 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
         self.projects = ProjectRepository(session)
         self.sources = SourceRepository(session)
         self.job_sources = AnalysisJobSourceRepository(session)
+        self.snapshots = SourceSnapshotRepository(session)
 
         self.users = UserRepository(session)
 

@@ -1660,6 +1660,64 @@
         }
       }
     },
+    "/api/v1/projects/{project_id}/source-snapshots/{snapshot_id}/content": {
+      "get": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Get Snapshot Content",
+        "operationId": "get_snapshot_content_api_v1_projects__project_id__source_snapshots__snapshot_id__content_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "snapshot_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Snapshot Id"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceSnapshotContentResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project_id}/documents/{document_id}/analysis-jobs": {
       "post": {
         "tags": [
@@ -5331,6 +5389,43 @@
           "document"
         ],
         "title": "SourceScopeVO"
+      },
+      "SourceSnapshotContentResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "chars": {
+            "type": "integer",
+            "title": "Chars"
+          },
+          "taken_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Taken At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "text",
+          "chars"
+        ],
+        "title": "SourceSnapshotContentResponse",
+        "description": "Текст снимка; offsets в основаниях правок считаются в кодпойнтах этого текста."
       },
       "SuggestionCounters": {
         "properties": {

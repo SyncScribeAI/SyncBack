@@ -34,6 +34,10 @@ class SourceNotFoundError(DomainError):
     pass
 
 
+class SourceSnapshotNotFoundError(DomainError):
+    pass
+
+
 class InvalidSourceScopeError(DomainError):
     """Источник со scope=document нельзя создать без документа."""
 

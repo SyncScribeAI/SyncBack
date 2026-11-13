@@ -1,5 +1,6 @@
 """Единая точка чтения конфигурации приложения."""
 
+import codecs
 import ipaddress
 from functools import lru_cache
 from typing import Annotated, Literal
@@ -173,6 +174,28 @@ class Settings(BaseSettings):
     source_url_max_bytes: int = Field(default=5 * 1024 * 1024, gt=0)
     source_url_connect_timeout_seconds: float = Field(default=5.0, gt=0)
     source_url_read_timeout_seconds: float = Field(default=20.0, gt=0)
+
+    # Выделение основного содержимого страниц. Селектор корня задаётся по хосту JSON-объектом
+    # {"wiki.corp": "#main-content"}; ключ с ведущей точкой подходит для поддоменов. Порог
+    # доли текста и минимум символов являются гипотезами и проверяются на порталах владельца.
+    source_html_content_selectors: dict[str, str] = {}
+    source_html_min_kept_share: float = Field(default=0.1, ge=0, le=1)
+    source_html_min_chars: int = Field(default=200, ge=0)
+    source_html_fallback_encoding: str = "cp1251"
+
+    @field_validator("source_html_fallback_encoding")
+    @classmethod
+    def _validate_fallback_encoding(cls, v: str) -> str:
+        try:
+            codecs.lookup(v)
+        except LookupError as exc:
+            raise ValueError(f"SOURCE_HTML_FALLBACK_ENCODING: неизвестная кодировка {v}") from exc
+        return v
+
+    @field_validator("source_html_content_selectors")
+    @classmethod
+    def _normalize_selector_hosts(cls, v: dict[str, str]) -> dict[str, str]:
+        return {host.strip().rstrip(".").lower(): selector for host, selector in v.items()}
 
     @field_validator("source_url_allowed_hosts", "source_url_allowed_networks", mode="before")
     @classmethod

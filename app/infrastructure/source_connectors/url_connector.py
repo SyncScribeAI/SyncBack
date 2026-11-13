@@ -42,15 +42,18 @@ from app.domain.exceptions import (
     SourceRequiresAuthError,
 )
 from app.domain.interfaces.source_connector import SourceKind, SourceMetadata, SourceRef
-from app.domain.source_text import paragraphize, serialize_source
 from app.domain.source_url import (
     DEFAULT_SOURCE_URL_POLICY,
     IpAddress,
     SourceUrl,
     SourceUrlPolicy,
 )
-from app.domain.text_normalization import normalize_text
-from app.infrastructure.source_connectors.html_structure import iter_html_fragments
+from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
+from app.infrastructure.source_connectors.source_content import (
+    FetchedContent,
+    HtmlOptions,
+    SourceContentConverter,
+)
 
 logger = logging.getLogger("syncscribe.connectors.url")
 
@@ -60,7 +63,6 @@ _USER_AGENT: Final = "SyncScribeBot/1.0 (+https://syncscribe.app/bot)"
 _TIMEOUT: Final = httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=5.0)
 _ROBOTS_TIMEOUT: Final = 3.0
 _ROBOTS_MAX_BYTES: Final = 512 * 1024
-_MARKDOWN_SUFFIXES: Final = (".md", ".markdown")
 _AUTH_STATUSES: Final = frozenset({401, 403})
 # Поле пароля на странице после редиректа на чужой хост означает форму входа SSO.
 _PASSWORD_INPUT: Final = re.compile(rb"<input\b[^>]*\btype\s*=\s*[\"']?password", re.IGNORECASE)
@@ -131,7 +133,9 @@ class UrlConnector:
         timeout: httpx.Timeout = _TIMEOUT,
         ca_bundle: str = "",
         auth_headers: AuthHeaders | None = None,
+        converter: SourceContentConverter | None = None,
     ) -> None:
+        self._converter = converter or SourceContentConverter(DocumentParserRegistry())
         self._max_bytes = max_bytes
         self._max_redirects = max_redirects
         self._resolver = resolver
@@ -153,14 +157,14 @@ class UrlConnector:
         return source_type == SourceKind.URL
 
     async def fetch(self, source: SourceRef) -> str:
-        raw, content_type = await self._fetch_raw(source)
-        return self._to_text(raw, content_type)
+        content = await self.fetch_content(source)
+        return self._to_text(content.raw, content.media_type)
 
     async def fetch_structured(self, source: SourceRef) -> str:
-        raw, content_type = await self._fetch_raw(source)
-        return self._to_source_text(raw, content_type, source.url or "")
+        return self._converter.to_source_text(await self.fetch_content(source))
 
-    async def _fetch_raw(self, source: SourceRef) -> tuple[bytes, str]:
+    async def fetch_content(self, source: SourceRef) -> FetchedContent:
+        """Байты страницы с типом и итоговым адресом, без преобразования в текст."""
         if not source.url:
             raise ValueError(f"url отсутствует для источника {source.id}")
 
@@ -188,7 +192,7 @@ class UrlConnector:
             uploaded_at=source.uploaded_at.isoformat(),
         )
 
-    async def _download(self, client: httpx.AsyncClient, url: SourceUrl) -> tuple[bytes, str]:
+    async def _download(self, client: httpx.AsyncClient, url: SourceUrl) -> FetchedContent:
         origin_host = url.host
         for _ in range(self._max_redirects + 1):
             address = await self._pick_address(url)
@@ -209,7 +213,7 @@ class UrlConnector:
                 content_type = response.headers.get("content-type", "")
                 if url.host != origin_host and self._is_login_page(raw, content_type):
                     raise SourceRequiresAuthError()
-                return raw, content_type
+                return FetchedContent.from_content_type(raw, content_type, url.value)
         raise SourceFetchError(f"Слишком много редиректов (больше {self._max_redirects})")
 
     @staticmethod
@@ -299,17 +303,6 @@ class UrlConnector:
         logger.warning("robots.txt запрещает скачивание", extra={"url": url.value})
 
     @staticmethod
-    def _to_source_text(raw: bytes, content_type: str, url: str) -> str:
-        media_type = content_type.split(";", 1)[0].strip().lower()
-        if "html" in media_type:
-            return serialize_source(iter_html_fragments(raw))
-        text = normalize_text(raw.decode("utf-8", errors="replace"))
-        # Markdown по ссылке (raw-файлы репозиториев) уже в формате источника.
-        if media_type == "text/markdown" or urlsplit(url).path.lower().endswith(_MARKDOWN_SUFFIXES):
-            return text
-        return paragraphize(text)
-
-    @staticmethod
     def _to_text(raw: bytes, content_type: str) -> str:
         if "html" in content_type:
             return UrlConnector._strip_html(raw)
@@ -343,4 +336,13 @@ def build_url_connector(settings: Settings) -> UrlConnector:
         ),
         ca_bundle=settings.source_url_ca_bundle,
         auth_headers=load_auth_headers(settings.source_url_auth_headers_file),
+        converter=SourceContentConverter(
+            DocumentParserRegistry(),
+            HtmlOptions(
+                content_selectors=settings.source_html_content_selectors,
+                min_kept_share=settings.source_html_min_kept_share,
+                min_chars=settings.source_html_min_chars,
+                fallback_encoding=settings.source_html_fallback_encoding,
+            ),
+        ),
     )

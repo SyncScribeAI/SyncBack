@@ -14,6 +14,13 @@ class UploadCapabilities(BaseModel):
     document_extensions: list[str] = Field(
         description="Расширения файлов документа, которые принимает загрузка (с точкой, строчные)"
     )
+    source_extensions: list[str] | None = Field(
+        default=None,
+        description=(
+            "Расширения файлов источника, которые принимает загрузка (с точкой, строчные); "
+            "форма источника читает их вместо document_extensions"
+        ),
+    )
     unsupported_extensions: list[str] = Field(
         description="Известные расширения, на которые загрузка ответит 415"
     )

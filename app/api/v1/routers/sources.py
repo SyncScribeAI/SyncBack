@@ -35,11 +35,13 @@ from app.core.config import Settings, get_settings
 from app.core.dependencies import get_source_service
 from app.domain.exceptions import (
     DocumentNotFoundError,
+    DocumentParseError,
     FileTooLargeError,
     InvalidSourceScopeError,
     InvalidSourceUrlError,
     SourceLockError,
     SourceNotFoundError,
+    UnreadablePdfError,
     UnsupportedFormatError,
 )
 from app.domain.services.source_service import SourceService
@@ -60,6 +62,11 @@ def _to_http(exc: Exception) -> HTTPException:
         return HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc))
     if isinstance(exc, InvalidSourceScopeError | InvalidSourceUrlError):
         return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    # Формат известен, но файл непригоден (скан, пароль, сломан): это 422, а не 415.
+    if isinstance(exc, UnreadablePdfError | DocumentParseError):
+        return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    if isinstance(exc, UnsupportedFormatError):
+        return HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc))
     raise exc
 
 
@@ -133,9 +140,15 @@ async def upload_file_source(
     source_service: SourceService = Depends(get_source_service),
     settings: Settings = Depends(get_settings),
 ) -> SourceResponse:
-    """Загрузить файловый источник."""
+    """Загрузить файловый источник.
+
+    Принимаются .docx, .md, .markdown, .txt и .pdf; другой формат даёт 415. PDF без
+    текстового слоя, с паролем или больше лимита страниц даёт 422 с причиной. Если текста
+    нет только на части страниц, файл принимается, а их номера приходят в
+    pages_without_text.
+    """
     try:
-        source = await source_service.create_file_source(
+        source, report = await source_service.create_file_source(
             project,
             name=name,
             filename=file.filename or "upload",
@@ -143,9 +156,12 @@ async def upload_file_source(
             scope=scope,
             document_id=document_id,
         )
-    except _SOURCE_ERRORS as exc:
+    except (*_SOURCE_ERRORS, UnsupportedFormatError, DocumentParseError) as exc:
         raise _to_http(exc) from exc
-    return SourceResponse.model_validate(source)
+    response = SourceResponse.model_validate(source)
+    if report.pages_without_text:
+        response.pages_without_text = list(report.pages_without_text)
+    return response
 
 
 @router.get("", response_model=Page[SourceResponse])

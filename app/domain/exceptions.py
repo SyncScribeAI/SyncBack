@@ -91,6 +91,22 @@ class DocumentParseError(DomainError):
     pass
 
 
+class UnreadablePdfError(UnsupportedFormatError):
+    """PDF не годится для разбора; сообщение называет причину и что загрузить вместо него."""
+
+
+class PdfHasNoTextLayerError(UnreadablePdfError):
+    pass
+
+
+class PdfEncryptedError(UnreadablePdfError):
+    pass
+
+
+class PdfTooLargeError(UnreadablePdfError):
+    pass
+
+
 # ---------------------------------------------------------------------------
 # Analysis jobs
 # ---------------------------------------------------------------------------

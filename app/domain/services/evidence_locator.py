@@ -322,7 +322,7 @@ class EvidenceLocator:
             start=hit.start,
             end=hit.end,
             segment_index=index.segment_index(hit.start),
-            locator=None if span is None else span.locator,
+            locator=None if span is None else span.locator_for(hit.start, hit.end),
         )
 
 

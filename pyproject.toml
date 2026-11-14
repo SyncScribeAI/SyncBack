@@ -26,6 +26,8 @@ dependencies = [
     "python-multipart>=0.0.9",
     "python-docx>=1.1",
     "markdown-it-py==4.3.0",
+    # Колёса содержат собранный PDFium, системные пакеты в образе не нужны.
+    "pypdfium2>=5.15,<6",
     "uvicorn[standard]>=0.29",
     "structlog>=24.1",
     "gunicorn>=22.0",
@@ -41,6 +43,8 @@ dev = [
     "mypy>=1.10",
     "fakeredis>=2.23",
     "aiosqlite>=0.20",
+    # Только для scripts/pdf_spike: отметки рецензирования в проверке набора P0.
+    "pypdf>=7.0,<8",
     "anyio>=4.0",
 ]
 

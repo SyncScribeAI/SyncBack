@@ -1442,7 +1442,7 @@
           "sources"
         ],
         "summary": "Upload File Source",
-        "description": "Загрузить файловый источник.",
+        "description": "Загрузить файловый источник.\n\nПринимаются .docx, .md, .markdown, .txt и .pdf; другой формат даёт 415. PDF без\nтекстового слоя, с паролем или больше лимита страниц даёт 422 с причиной. Если текста\nнет только на части страниц, файл принимается, а их номера приходят в\npages_without_text.",
         "operationId": "upload_file_source_api_v1_projects__project_id__sources_file_post",
         "security": [
           {
@@ -5656,6 +5656,21 @@
             "type": "string",
             "format": "date-time",
             "title": "Created At"
+          },
+          "pages_without_text": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pages Without Text",
+            "description": "Только в ответе на загрузку PDF: страницы без текстового слоя (с единицы). Файл принят, но текст этих страниц в анализ не попадёт"
           }
         },
         "type": "object",
@@ -6154,6 +6169,21 @@
             "type": "array",
             "title": "Document Extensions",
             "description": "Расширения файлов документа, которые принимает загрузка (с точкой, строчные)"
+          },
+          "source_extensions": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Extensions",
+            "description": "Расширения файлов источника, которые принимает загрузка (с точкой, строчные); форма источника читает их вместо document_extensions"
           },
           "unsupported_extensions": {
             "items": {

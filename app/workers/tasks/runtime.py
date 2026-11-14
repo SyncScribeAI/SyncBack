@@ -27,7 +27,7 @@ def get_storage() -> S3FileStorage:
 
 @functools.cache
 def get_parser_registry() -> DocumentParserRegistry:
-    return DocumentParserRegistry()
+    return DocumentParserRegistry(pdf_max_pages=get_settings().pdf_max_pages)
 
 
 @functools.cache

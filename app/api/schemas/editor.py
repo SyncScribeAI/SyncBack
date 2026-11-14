@@ -38,10 +38,25 @@ class EditorBlockResponse(BaseModel):
     heading_level: int | None = None
 
 
+class PageSizeResponse(BaseModel):
+    """Размер страницы в точках с учётом CropBox и поворота."""
+
+    number: int
+    width: float
+    height: float
+
+
 class EditorContent(BaseModel):
     plain_text: str
     sections: list[DocumentSectionResponse] = []
     blocks: list[EditorBlockResponse] = []
+    pages: list[PageSizeResponse] | None = Field(
+        default=None,
+        description=(
+            "Только у PDF: размеры страниц в порядке просмотра, чтобы клиент разметил "
+            "страницы до отрисовки и наложил прямоугольники geometry"
+        ),
+    )
 
 
 class EditorPermissions(BaseModel):

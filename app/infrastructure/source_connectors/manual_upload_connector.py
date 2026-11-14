@@ -7,6 +7,7 @@ ManualUploadConnector — скачивает файл из хранилища и
 
 from app.domain.interfaces.file_storage import FileStorage
 from app.domain.interfaces.source_connector import SourceKind, SourceMetadata, SourceRef
+from app.domain.source_text import SourceLayout
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 
 
@@ -25,6 +26,10 @@ class ManualUploadConnector:
     async def fetch_structured(self, source: SourceRef) -> str:
         storage_key, raw_bytes = await self._download(source)
         return self._parsers.extract_source_text(storage_key, raw_bytes)
+
+    async def fetch_layout(self, source: SourceRef) -> SourceLayout:
+        storage_key, raw_bytes = await self._download(source)
+        return self._parsers.extract_source_layout(storage_key, raw_bytes)
 
     async def _download(self, source: SourceRef) -> tuple[str, bytes]:
         if source.type != SourceKind.FILE:

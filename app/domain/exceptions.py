@@ -34,6 +34,10 @@ class SourceNotFoundError(DomainError):
     pass
 
 
+class SourceSnapshotNotFoundError(DomainError):
+    pass
+
+
 class InvalidSourceScopeError(DomainError):
     """Источник со scope=document нельзя создать без документа."""
 
@@ -44,6 +48,16 @@ class InvalidSourceUrlError(DomainError):
 
 class SourceFetchError(DomainError):
     """Содержимое источника по ссылке получить не удалось: редиректы, размер, ответ сервера."""
+
+
+class SourceRequiresAuthError(SourceFetchError):
+    """Страница по ссылке открывается только после входа пользователя."""
+
+    def __init__(
+        self,
+        message: str = "Страница требует входа. Сохраните её как файл и загрузите как источник",
+    ) -> None:
+        super().__init__(message)
 
 
 class FileTooLargeError(DomainError):
@@ -74,6 +88,22 @@ class InvalidDocumentStatusError(DomainError):
 
 
 class DocumentParseError(DomainError):
+    pass
+
+
+class UnreadablePdfError(UnsupportedFormatError):
+    """PDF не годится для разбора; сообщение называет причину и что загрузить вместо него."""
+
+
+class PdfHasNoTextLayerError(UnreadablePdfError):
+    pass
+
+
+class PdfEncryptedError(UnreadablePdfError):
+    pass
+
+
+class PdfTooLargeError(UnreadablePdfError):
     pass
 
 

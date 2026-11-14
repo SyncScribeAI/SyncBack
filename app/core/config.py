@@ -1,11 +1,15 @@
 """Единая точка чтения конфигурации приложения."""
 
+import codecs
+import ipaddress
 from functools import lru_cache
 from typing import Annotated, Literal
 from urllib.parse import unquote, urlsplit
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from app.domain.source_url import SourceUrlPolicy
 
 _WEAK_SECRET_VALUES = {
     "admin",
@@ -143,6 +147,12 @@ class Settings(BaseSettings):
     # Флаги «проверьте вручную» целиком уходят в агрегат редактора; лишние отбрасываются
     # с предупреждением в логе, чтобы ответ GET /editor оставался ограниченным.
     analysis_max_flags: int = Field(default=500, gt=0, le=5000)
+    # Доля слов цитаты, которая должна найтись в сегменте источника, чтобы сегмент считался
+    # её основанием. [гипотеза] 0.6 уточняется по первым реальным прогонам.
+    analysis_evidence_min_containment: float = Field(default=0.6, gt=0, le=1)
+    # Больше страниц PDF не разбирается: разбор держит общий замок PDFium, и один огромный
+    # файл задержал бы все остальные.
+    pdf_max_pages: int = Field(default=500, gt=0)
     # Очередь Celery задачи анализа v2: её слушает отдельный воркер с числом процессов, равным
     # числу одновременных прогонов, которое выдерживает ML-конвейер. «celery» вернёт задачу в
     # общую очередь — для разработки с одним воркером.
@@ -153,6 +163,74 @@ class Settings(BaseSettings):
     suggestion_propagate_exact: bool = False
     suggestion_propagate_max_groups: int = Field(default=50, gt=0, le=500)
     suggestion_propagate_max_per_group: int = Field(default=50, gt=0, le=500)
+
+    # Источники по ссылке. По умолчанию пускаются только публичные адреса. Внутренний
+    # портал доступен, когда его имя есть в SOURCE_URL_ALLOWED_HOSTS (точное имя или
+    # суффикс с ведущей точкой) и адрес входит в SOURCE_URL_ALLOWED_NETWORKS. Подсеть
+    # Docker в список сетей не вносится: иначе ссылки дотянутся до сервисов compose.
+    source_url_allowed_hosts: Annotated[list[str], NoDecode] = []
+    source_url_allowed_networks: Annotated[list[str], NoDecode] = []
+    source_url_allow_public: bool = True
+    source_url_ca_bundle: str = ""
+    source_url_auth_headers_file: str = ""
+    source_url_user_agent: str = Field(
+        default="SyncScribeBot/1.0 (+https://syncscribe.app/bot)", min_length=1, max_length=200
+    )
+    source_url_robots: Literal["off", "log", "enforce"] = "log"
+    source_url_max_bytes: int = Field(default=5 * 1024 * 1024, gt=0)
+    source_url_connect_timeout_seconds: float = Field(default=5.0, gt=0)
+    source_url_read_timeout_seconds: float = Field(default=20.0, gt=0)
+
+    # Выделение основного содержимого страниц. Селектор корня задаётся по хосту JSON-объектом
+    # {"wiki.corp": "#main-content"}; ключ с ведущей точкой подходит для поддоменов. Порог
+    # доли текста и минимум символов являются гипотезами и проверяются на порталах владельца.
+    source_html_content_selectors: dict[str, str] = {}
+    source_html_min_kept_share: float = Field(default=0.1, ge=0, le=1)
+    source_html_min_chars: int = Field(default=200, ge=0)
+    source_html_fallback_encoding: str = "cp1251"
+
+    @field_validator("source_html_fallback_encoding")
+    @classmethod
+    def _validate_fallback_encoding(cls, v: str) -> str:
+        try:
+            codecs.lookup(v)
+        except LookupError as exc:
+            raise ValueError(f"SOURCE_HTML_FALLBACK_ENCODING: неизвестная кодировка {v}") from exc
+        return v
+
+    @field_validator("source_html_content_selectors")
+    @classmethod
+    def _normalize_selector_hosts(cls, v: dict[str, str]) -> dict[str, str]:
+        return {host.strip().rstrip(".").lower(): selector for host, selector in v.items()}
+
+    @field_validator("source_url_allowed_hosts", "source_url_allowed_networks", mode="before")
+    @classmethod
+    def _parse_comma_list(cls, v: object) -> list[str]:
+        if isinstance(v, str):
+            v = [item.strip() for item in v.split(",") if item.strip()]
+        if not isinstance(v, list):
+            raise ValueError("ожидается список через запятую")
+        return v
+
+    @field_validator("source_url_allowed_networks")
+    @classmethod
+    def _validate_networks(cls, v: list[str]) -> list[str]:
+        for network in v:
+            try:
+                ipaddress.ip_network(network, strict=False)
+            except ValueError as exc:
+                raise ValueError(
+                    f"SOURCE_URL_ALLOWED_NETWORKS: некорректная сеть {network}"
+                ) from exc
+        return v
+
+    @property
+    def source_url_policy(self) -> SourceUrlPolicy:
+        return SourceUrlPolicy.from_lists(
+            self.source_url_allowed_hosts,
+            self.source_url_allowed_networks,
+            allow_public=self.source_url_allow_public,
+        )
 
     @model_validator(mode="after")
     def _validate_analysis(self) -> "Settings":

@@ -65,12 +65,12 @@ async def test_create_sources_of_all_kinds_and_list(
     response = await client.post(
         f"{base}/file",
         data={"name": "Файл"},
-        files={"file": ("../../etc/passwd", b"root", "text/plain")},
+        files={"file": ("../../etc/passwd.txt", b"root", "text/plain")},
         headers=headers,
     )
     assert response.status_code == 201, response.text
     file_source = response.json()
-    assert file_storage.files[f"projects/{project_id}/sources/{file_source['id']}"] == b"root"
+    assert file_storage.files[f"projects/{project_id}/sources/{file_source['id']}.txt"] == b"root"
 
     response = await client.get(base, headers=headers)
     assert response.status_code == 200, response.text
@@ -279,3 +279,81 @@ async def test_unsafe_source_url_is_rejected(client: AsyncClient, url: str) -> N
     )
 
     assert response.status_code == 422, response.text
+
+
+async def test_check_source_loads_url_without_saving(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ipaddress
+
+    import httpx
+
+    from app.core import dependencies
+    from app.infrastructure.source_connectors.url_connector import UrlConnector
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        if request.url.path == "/closed":
+            return httpx.Response(401)
+        return httpx.Response(200, text="Лимит 50 МБ", headers={"content-type": "text/plain"})
+
+    async def resolve(host: str, port: int) -> list:
+        return [ipaddress.ip_address("93.184.216.34")]
+
+    connector = UrlConnector(resolver=resolve, transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(dependencies, "_get_url_connector", lambda: connector)
+
+    headers = await register_and_login(client)
+    project_id = await create_project(client, headers)
+    base = f"/api/v1/projects/{project_id}/sources"
+    opened = await _create_url(client, headers, project_id)
+    closed = await _create_url(client, headers, project_id, url="https://example.com/closed")
+
+    response = await client.post(f"{base}/{opened['id']}/check", headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "chars": len("Лимит 50 МБ"), "error": None}
+
+    response = await client.post(f"{base}/{closed['id']}/check", headers=headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ok"] is False
+    assert "Страница требует входа" in body["error"]
+
+    response = await client.post(f"{base}/{uuid.uuid4()}/check", headers=headers)
+    assert response.status_code == 404
+
+
+async def test_check_source_reads_stored_file(
+    client: AsyncClient, file_storage: InMemoryFileStorage
+) -> None:
+    headers = await register_and_login(client)
+    project_id = await create_project(client, headers)
+    base = f"/api/v1/projects/{project_id}/sources"
+    response = await client.post(
+        f"{base}/note", json={"name": "Заметка", "text_content": "важно"}, headers=headers
+    )
+    assert response.status_code == 201, response.text
+    keys_before = set(file_storage.files) if hasattr(file_storage, "files") else None
+
+    response = await client.post(f"{base}/{response.json()['id']}/check", headers=headers)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["ok"] is True
+    assert response.json()["chars"] > 0
+    if keys_before is not None:
+        assert set(file_storage.files) == keys_before
+
+
+async def test_private_url_is_rejected_on_create(client: AsyncClient) -> None:
+    headers = await register_and_login(client)
+    project_id = await create_project(client, headers)
+
+    response = await client.post(
+        f"/api/v1/projects/{project_id}/sources",
+        json={"name": "Внутр", "type": "url", "url": "http://10.0.0.5/page"},
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+    assert "список разрешённых" in response.json()["detail"]

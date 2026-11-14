@@ -1442,7 +1442,7 @@
           "sources"
         ],
         "summary": "Upload File Source",
-        "description": "Загрузить файловый источник.",
+        "description": "Загрузить файловый источник.\n\nПринимаются .docx, .md, .markdown, .txt и .pdf; другой формат даёт 415. PDF без\nтекстового слоя, с паролем или больше лимита страниц даёт 422 с причиной. Если текста\nнет только на части страниц, файл принимается, а их номера приходят в\npages_without_text.",
         "operationId": "upload_file_source_api_v1_projects__project_id__sources_file_post",
         "security": [
           {
@@ -1554,6 +1554,65 @@
         }
       }
     },
+    "/api/v1/projects/{project_id}/sources/{source_id}/check": {
+      "post": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Check Source",
+        "description": "Загрузить и разобрать источник так же, как это сделает анализ.\n\nОтказ загрузки приходит в ответе 200 с ok=false и текстом в error: фронтенд\nпоказывает его сразу после добавления ссылки.",
+        "operationId": "check_source_api_v1_projects__project_id__sources__source_id__check_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Source Id"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceCheckResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project_id}/sources/{source_id}": {
       "delete": {
         "tags": [
@@ -1645,6 +1704,64 @@
             "description": "Successful Response",
             "content": {
               "application/octet-stream": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project_id}/source-snapshots/{snapshot_id}/content": {
+      "get": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Get Snapshot Content",
+        "operationId": "get_snapshot_content_api_v1_projects__project_id__source_snapshots__snapshot_id__content_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "snapshot_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Snapshot Id"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceSnapshotContentResponse"
+                }
+              }
             }
           },
           "422": {
@@ -3057,6 +3174,17 @@
             "title": "Position",
             "description": "Порядок флага в ответе конвейера"
           },
+          "geometry": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PageGeometryResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Только у PDF: блок флага на страницах оригинала"
+          },
           "status": {
             "type": "string",
             "enum": [
@@ -4017,6 +4145,21 @@
                 "type": "null"
               }
             ]
+          },
+          "pages_without_text": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pages Without Text",
+            "description": "Только в ответе на загрузку PDF: страницы без текстового слоя (с единицы). Документ принят, но текст этих страниц в анализ и редактор не попадёт"
           }
         },
         "type": "object",
@@ -4198,6 +4341,21 @@
             "type": "array",
             "title": "Blocks",
             "default": []
+          },
+          "pages": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PageSizeResponse"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pages",
+            "description": "Только у PDF: размеры страниц в порядке просмотра, чтобы клиент разметил страницы до отрисовки и наложил прямоугольники geometry"
           }
         },
         "type": "object",
@@ -4336,6 +4494,119 @@
         ],
         "title": "EditorPermissions"
       },
+      "EvidenceResponse": {
+        "properties": {
+          "source_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Id",
+            "description": "Источник цитаты; None, если источник не определён или удалён"
+          },
+          "source_name": {
+            "type": "string",
+            "title": "Source Name",
+            "description": "Имя источника на момент анализа или из цитаты"
+          },
+          "snapshot_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Id",
+            "description": "Снимок источника, в котором искалась цитата: GET /api/v1/projects/{project_id}/source-snapshots/{snapshot_id}/content"
+          },
+          "quote": {
+            "type": "string",
+            "title": "Quote",
+            "description": "Цитата в том виде, в каком её вернул конвейер"
+          },
+          "match": {
+            "type": "string",
+            "enum": [
+              "exact",
+              "approximate",
+              "not_found"
+            ],
+            "title": "Match",
+            "description": "exact — найден диапазон цитаты; approximate — цитата пересказана, диапазон покрывает сегмент; not_found — места в снимке нет"
+          },
+          "start_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Offset",
+            "description": "Начало в тексте снимка, в символах Unicode"
+          },
+          "end_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Offset",
+            "description": "Конец в тексте снимка, не включая"
+          },
+          "segment_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Segment Index",
+            "description": "Номер сегмента снимка"
+          },
+          "locator": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locator",
+            "description": "Место в исходном файле. docx_paragraphs: first и last, порядковые номера непустых абзацев файла, оба включены"
+          },
+          "original_file_available": {
+            "type": "boolean",
+            "title": "Original File Available",
+            "description": "Файл источника тот же, что разбирался при анализе: подсветку можно показать в оригинале; иначе только в тексте снимка",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "source_name",
+          "quote",
+          "match"
+        ],
+        "title": "EvidenceResponse",
+        "description": "Цитата источника, на которой основана правка, и её место в снимке источника."
+      },
       "ExportCapabilities": {
         "properties": {
           "endpoint": {
@@ -4370,6 +4641,91 @@
           "text": {
             "type": "string",
             "title": "Text"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Id"
+          },
+          "snapshot_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Id"
+          },
+          "match": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "exact",
+                  "approximate",
+                  "not_found"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Match"
+          },
+          "start_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Offset"
+          },
+          "end_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Offset"
+          },
+          "segment_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Segment Index"
+          },
+          "locator": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locator"
           }
         },
         "type": "object",
@@ -4436,6 +4792,50 @@
           "text_content"
         ],
         "title": "NoteCreateRequest"
+      },
+      "PageGeometryResponse": {
+        "properties": {
+          "rects": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "title": "Rects",
+            "description": "Прямоугольники [page, x0, y0, x1, y1]: page с единицы, координаты в точках в пространстве страницы PDF (начало внизу слева, без учёта CropBox и /Rotate), как у аннотаций. У вставки это символ перед точкой вставки"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rects"
+        ],
+        "title": "PageGeometryResponse"
+      },
+      "PageSizeResponse": {
+        "properties": {
+          "number": {
+            "type": "integer",
+            "title": "Number"
+          },
+          "width": {
+            "type": "number",
+            "title": "Width"
+          },
+          "height": {
+            "type": "number",
+            "title": "Height"
+          }
+        },
+        "type": "object",
+        "required": [
+          "number",
+          "width",
+          "height"
+        ],
+        "title": "PageSizeResponse",
+        "description": "Размер страницы в точках с учётом CropBox и поворота."
       },
       "Page_DocumentResponse_": {
         "properties": {
@@ -5141,6 +5541,36 @@
         "title": "SourceBadge",
         "description": "Минимум для строки источника на карточке документа: название, тип, адрес, дата."
       },
+      "SourceCheckResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "chars": {
+            "type": "integer",
+            "title": "Chars"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "chars"
+        ],
+        "title": "SourceCheckResponse",
+        "description": "Итог пробной загрузки источника: ничего не сохраняется."
+      },
       "SourceContentResponse": {
         "properties": {
           "id": {
@@ -5311,6 +5741,21 @@
             "type": "string",
             "format": "date-time",
             "title": "Created At"
+          },
+          "pages_without_text": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pages Without Text",
+            "description": "Только в ответе на загрузку PDF: страницы без текстового слоя (с единицы). Файл принят, но текст этих страниц в анализ не попадёт"
           }
         },
         "type": "object",
@@ -5331,6 +5776,43 @@
           "document"
         ],
         "title": "SourceScopeVO"
+      },
+      "SourceSnapshotContentResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "chars": {
+            "type": "integer",
+            "title": "Chars"
+          },
+          "taken_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Taken At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "text",
+          "chars"
+        ],
+        "title": "SourceSnapshotContentResponse",
+        "description": "Текст снимка; offsets в основаниях правок считаются в кодпойнтах этого текста."
       },
       "SuggestionCounters": {
         "properties": {
@@ -5589,6 +6071,25 @@
             "description": "model — правка конвейера; propagated — найдена бэкендом по точному повтору",
             "default": "model"
           },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceResponse"
+            },
+            "type": "array",
+            "title": "Evidence",
+            "description": "Основания правки; пусто, если цитаты не извлеклись или анализ старый"
+          },
+          "geometry": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PageGeometryResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Только у PDF: где правка на страницах оригинала; None у других форматов"
+          },
           "status": {
             "type": "string",
             "enum": [
@@ -5764,6 +6265,21 @@
             "type": "array",
             "title": "Document Extensions",
             "description": "Расширения файлов документа, которые принимает загрузка (с точкой, строчные)"
+          },
+          "source_extensions": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Extensions",
+            "description": "Расширения файлов источника, которые принимает загрузка (с точкой, строчные); форма источника читает их вместо document_extensions"
           },
           "unsupported_extensions": {
             "items": {

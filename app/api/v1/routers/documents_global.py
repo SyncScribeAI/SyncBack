@@ -16,13 +16,15 @@ import uuid
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 
 from app.api.deps import get_current_user
-from app.api.schemas.document import DocumentResponse
+from app.api.schemas.document import DocumentResponse, uploaded_document_response
 from app.api.upload_utils import upload_content
 from app.core.config import Settings, get_settings
 from app.core.dependencies import get_document_service, get_project_service
 from app.domain.exceptions import (
+    DocumentParseError,
     FileTooLargeError,
     ProjectNotFoundError,
+    UnreadablePdfError,
     UnsupportedFileFormatError,
 )
 from app.domain.services.document_service import DocumentService
@@ -70,7 +72,14 @@ async def upload_document_global(
         ) from exc
 
     try:
-        document = await document_service.upload_document(project.id, file.filename, content)
+        document, report = await document_service.upload_document(
+            project.id, file.filename, content
+        )
+    # Формат известен, но файл непригоден (скан, пароль, сломан): это 422, а не 415.
+    except (UnreadablePdfError, DocumentParseError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
     except UnsupportedFileFormatError as exc:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
@@ -82,4 +91,4 @@ async def upload_document_global(
             detail=str(exc),
         ) from exc
 
-    return DocumentResponse.model_validate(document)
+    return uploaded_document_response(document, report)

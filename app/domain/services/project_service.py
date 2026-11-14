@@ -22,6 +22,8 @@ from app.domain.project_appearance import (
     normalize_project_color,
     normalize_project_icon,
 )
+from app.domain.source_snapshot import fingerprints_storage_key
+from app.domain.storage_keys import derived_document_keys
 from app.domain.value_objects import ProjectContentCounts, UserRoleVO
 
 if TYPE_CHECKING:
@@ -130,6 +132,9 @@ class ProjectService:
         project_id = project.id
         async with self._uow:
             storage_keys = await self._uow.projects.collect_storage_keys(project_id)
+            storage_keys += [k for key in storage_keys for k in derived_document_keys(key)]
+            for key in await self._uow.snapshots.list_storage_keys(project_id):
+                storage_keys += [key, fingerprints_storage_key(key)]
             await self._uow.projects.delete(project)
             await self._uow.commit()
 

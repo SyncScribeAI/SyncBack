@@ -11,12 +11,19 @@ from app.domain.interfaces.document_parser import (
     DocumentSection,
     ParsedDocument,
 )
-from app.domain.source_text import SourceFragment, serialize_source
+from app.domain.source_text import SourceFragment, SourceLayout, serialize_source_layout
 from app.domain.text_normalization import normalize_text
-from app.infrastructure.docx_paragraphs import iter_docx_body, iter_docx_paragraphs
+from app.infrastructure.docx_paragraphs import (
+    iter_docx_body_items,
+    iter_docx_paragraphs,
+    iter_table_paragraphs,
+    table_rows,
+)
 
 _HEADING_STYLE_PREFIX = "Heading"
 _LIST_STYLE_PREFIX = "List"
+# Вид локатора: диапазон порядковых номеров непустых абзацев файла, оба конца включены.
+DOCX_PARAGRAPHS_LOCATOR = "docx_paragraphs"
 
 
 class DocxParser:
@@ -62,7 +69,10 @@ class DocxParser:
         return ParsedDocument(plain_text=plain_text, sections=sections, blocks=builder.build())
 
     def extract_source_text(self, raw_bytes: bytes) -> str:
-        return serialize_source(_iter_source_fragments(DocxDocument(io.BytesIO(raw_bytes))))
+        return self.extract_source_layout(raw_bytes).text
+
+    def extract_source_layout(self, raw_bytes: bytes) -> SourceLayout:
+        return serialize_source_layout(_iter_located_fragments(DocxDocument(io.BytesIO(raw_bytes))))
 
     def extract_text(self, raw_bytes: bytes) -> str:
         docx_document = DocxDocument(io.BytesIO(raw_bytes))
@@ -71,21 +81,44 @@ class DocxParser:
         )
 
 
-def _iter_source_fragments(docx_document: Any) -> Iterator[SourceFragment]:
-    for item in iter_docx_body(docx_document):
+def _iter_located_fragments(
+    docx_document: Any,
+) -> Iterator[tuple[SourceFragment, dict[str, Any]]]:
+    """Фрагменты источника и диапазон порядковых номеров непустых абзацев файла. O(P).
+
+    Номера считаются тем же обходом, что iter_docx_paragraphs, включая абзацы ячеек и
+    вложенных таблиц: просмотр DOCX находит абзац по номеру среди непустых абзацев и
+    проверяет его текстом. Таблица целиком один фрагмент, поэтому её диапазон покрывает
+    все её абзацы.
+    """
+    ordinal = 0
+    for item in iter_docx_body_items(docx_document):
         if isinstance(item, Paragraph):
             text = normalize_text(item.text)
-            if text.strip():
-                block_type, level = _classify(item, _style_name(item))
-                yield SourceFragment(block_type, text, level)
+            if not text.strip():
+                continue
+            block_type, level = _classify(item, _style_name(item))
+            yield SourceFragment(block_type, text, level), _paragraphs_locator(ordinal, ordinal)
+            ordinal += 1
             continue
+        first = ordinal
+        for cell_paragraph in iter_table_paragraphs(item):
+            if normalize_text(cell_paragraph.paragraph.text).strip():
+                ordinal += 1
         rows = [
             f"| {' | '.join(normalize_text(cell) for cell in cells)} |"
-            for cells in item
+            for cells in table_rows(item)
             if any(cells)
         ]
-        if rows:
-            yield SourceFragment(DocumentBlockType.TABLE, "\n".join(rows))
+        if rows and ordinal > first:
+            yield (
+                SourceFragment(DocumentBlockType.TABLE, "\n".join(rows)),
+                _paragraphs_locator(first, ordinal - 1),
+            )
+
+
+def _paragraphs_locator(first: int, last: int) -> dict[str, Any]:
+    return {"kind": DOCX_PARAGRAPHS_LOCATOR, "first": first, "last": last}
 
 
 def _style_name(paragraph: Paragraph) -> str:

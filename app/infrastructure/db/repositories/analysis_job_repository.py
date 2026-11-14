@@ -191,6 +191,7 @@ class AnalysisJobRepository(IAnalysisJobRepository):
             "contract_version": run.contract_version,
             "provider": run.provider,
             "meta": None if run.meta is None else dict(run.meta),
+            "evidence": None if run.evidence is None else dict(run.evidence),
         }
         job.checked_blocks = run.checked_blocks
         job.failed_blocks = run.failed_blocks

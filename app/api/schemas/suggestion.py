@@ -2,9 +2,11 @@
 
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
+
+from app.api.schemas.geometry import PageGeometryResponse
 
 
 class SuggestionSourceResponse(BaseModel):
@@ -17,6 +19,48 @@ class SuggestionSourceResponse(BaseModel):
     url: str | None = None
 
     model_config = {"from_attributes": True}
+
+
+class EvidenceResponse(BaseModel):
+    """Цитата источника, на которой основана правка, и её место в снимке источника."""
+
+    source_id: uuid.UUID | None = Field(
+        default=None, description="Источник цитаты; None, если источник не определён или удалён"
+    )
+    source_name: str = Field(description="Имя источника на момент анализа или из цитаты")
+    snapshot_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Снимок источника, в котором искалась цитата:"
+            " GET /api/v1/projects/{project_id}/source-snapshots/{snapshot_id}/content"
+        ),
+    )
+    quote: str = Field(description="Цитата в том виде, в каком её вернул конвейер")
+    match: Literal["exact", "approximate", "not_found"] = Field(
+        description=(
+            "exact — найден диапазон цитаты; approximate — цитата пересказана, диапазон"
+            " покрывает сегмент; not_found — места в снимке нет"
+        )
+    )
+    start_offset: int | None = Field(
+        default=None, description="Начало в тексте снимка, в символах Unicode"
+    )
+    end_offset: int | None = Field(default=None, description="Конец в тексте снимка, не включая")
+    segment_index: int | None = Field(default=None, description="Номер сегмента снимка")
+    locator: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Место в исходном файле. docx_paragraphs: first и last, порядковые номера"
+            " непустых абзацев файла, оба включены"
+        ),
+    )
+    original_file_available: bool = Field(
+        default=False,
+        description=(
+            "Файл источника тот же, что разбирался при анализе: подсветку можно показать"
+            " в оригинале; иначе только в тексте снимка"
+        ),
+    )
 
 
 class SuggestionResponse(BaseModel):
@@ -67,6 +111,15 @@ class SuggestionResponse(BaseModel):
     origin: Literal["model", "propagated"] = Field(
         default="model",
         description="model — правка конвейера; propagated — найдена бэкендом по точному повтору",
+    )
+    evidence: list[EvidenceResponse] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("evidence_view", "evidence"),
+        description="Основания правки; пусто, если цитаты не извлеклись или анализ старый",
+    )
+    geometry: PageGeometryResponse | None = Field(
+        default=None,
+        description="Только у PDF: где правка на страницах оригинала; None у других форматов",
     )
     status: Literal["pending", "accepted", "rejected"]
     # None — решение ещё не принято или сброшено.

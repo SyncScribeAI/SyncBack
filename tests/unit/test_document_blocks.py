@@ -23,6 +23,7 @@ P = DocumentBlockType.PARAGRAPH
 LI = DocumentBlockType.LIST_ITEM
 C = DocumentBlockType.CODE
 T = DocumentBlockType.TABLE
+O = DocumentBlockType.OTHER
 
 
 def _assert_invariants(parsed: ParsedDocument) -> None:
@@ -85,13 +86,14 @@ def test_markdown_headings_paragraphs_lists_and_code() -> None:
         (LI, "* cook"),
         (LI, "1. courier"),
         (C, "```python\nx = 1\n\n# не заголовок\n```"),
-        (T, "| a | b |\n|---|---|"),
-        (P, "Итог"),
+        (O, "---"),
+        # По GFM строка сразу после таблицы без пустой строки — её строка.
+        (T, "| a | b |\n|---|---|\nИтог"),
     ]
     headings = [b for b in parsed.blocks if b.type is H]
     assert [b.heading_level for b in headings] == [1, 2]
     assert [b.ref for b in parsed.blocks[:3]] == ["h-0", "p-1", "h-2"]
-    assert {b.type for b in parsed.blocks if not b.editable} == {H, C, T}
+    assert {b.type for b in parsed.blocks if not b.editable} == {H, C, T, O}
 
 
 def test_markdown_section_starts_match_heading_blocks() -> None:
@@ -274,8 +276,10 @@ def test_markdown_sections_ignore_hashes_inside_code() -> None:
 
 def test_markdown_heading_does_not_swallow_next_line() -> None:
     parsed = MarkdownParser().parse(b"#\ntext\n")
+    # «#» без текста по CommonMark — пустой заголовок: служебный блок, не раздел.
     assert parsed.sections == []
-    assert _summary(parsed) == [(P, "#\ntext")]
+    assert _summary(parsed) == [(O, "#"), (P, "text")]
+    assert parsed.blocks[0].editable is False
 
 
 # --- extract_text ---------------------------------------------------------------

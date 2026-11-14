@@ -29,6 +29,7 @@ _MEDIA_TYPES: dict[DocumentFormatVO, str] = {
     DocumentFormatVO.DOC: "application/msword",
     DocumentFormatVO.TXT: "text/plain",
     DocumentFormatVO.MARKDOWN: "text/markdown",
+    DocumentFormatVO.PDF: "application/pdf",
 }
 
 # Размер страницы при обходе принятых правок: компромисс между числом

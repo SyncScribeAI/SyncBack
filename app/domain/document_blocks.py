@@ -24,6 +24,9 @@ _READ_ONLY_TYPES = frozenset(
 )
 
 
+_SETEXT_UNDERLINE = frozenset("=-")
+
+
 def block_ref(block_type: DocumentBlockType, position: int) -> str:
     return f"{_REF_PREFIX[block_type]}-{position}"
 
@@ -34,6 +37,10 @@ def heading_title(heading_text: str) -> str:
     Одно правило для разделов редактора и section_ref правок: фронт сопоставляет их
     по строке, и любое расхождение в обрезке оставит правку без раздела.
     """
+    head, newline, last = heading_text.rpartition("\n")
+    # Setext-заголовок: подчёркивание из «=» или «-» к названию не относится.
+    if newline and last.strip() and set(last.strip()) <= _SETEXT_UNDERLINE:
+        heading_text = head
     return heading_text.lstrip("#").strip()
 
 
@@ -57,7 +64,10 @@ class DocumentBlocksBuilder:
         start_offset: int,
         end_offset: int,
         heading_level: int | None = None,
+        editable: bool | None = None,
     ) -> None:
+        """editable=None — правило по типу блока; False — формат знает, что фрагмент
+        служебный (front matter, HTML, разделитель), хотя тип у него общий OTHER."""
         if start_offset >= end_offset:
             return
         if start_offset < self._last_end or end_offset > self._text_length:
@@ -72,7 +82,7 @@ class DocumentBlocksBuilder:
                 position=position,
                 start_offset=start_offset,
                 end_offset=end_offset,
-                editable=block_type not in _READ_ONLY_TYPES,
+                editable=(block_type not in _READ_ONLY_TYPES) and editable is not False,
                 heading_level=heading_level if block_type is DocumentBlockType.HEADING else None,
             )
         )

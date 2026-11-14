@@ -28,6 +28,8 @@ class PipelineRunSummary:
     meta: Mapping[str, Any] | None
     checked_blocks: int | None
     failed_blocks: int | None
+    # Счётчики оснований (EvidenceCounters.as_meta); None, пока локатор не отработал.
+    evidence: Mapping[str, int] | None = None
 
     @property
     def meta_dropped(self) -> bool:

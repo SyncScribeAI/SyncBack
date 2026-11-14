@@ -11,9 +11,12 @@ NOTE убран — тексты хранятся в файловом храни
 
 import enum
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
+
+from app.domain.source_text import SourceLayout
 
 
 class SourceKind(enum.StrEnum):
@@ -48,5 +51,17 @@ class SourceConnector(Protocol):
         """
         ...
 
+    async def fetch_layout(self, source: SourceRef) -> SourceLayout:
+        """Текст fetch_structured и положение его фрагментов в исходном файле.
+
+        Положение нужно подсветке основания в оригинале; коннектор, который его не знает,
+        возвращает текст с пустым spans.
+        """
+        ...
+
     async def get_metadata(self, source: SourceRef) -> SourceMetadata: ...
     def supports(self, source_type: SourceKind) -> bool: ...
+
+
+# Выбор коннектора по типу источника; сборка коннекторов остаётся в точках сборки.
+SourceConnectorResolver = Callable[[SourceKind], SourceConnector]

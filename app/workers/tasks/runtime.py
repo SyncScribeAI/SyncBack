@@ -14,9 +14,10 @@ from app.domain.interfaces.event_publisher import IEventPublisher
 from app.domain.interfaces.source_connector import SourceConnector, SourceKind, SourceRef
 from app.infrastructure.db.models.source import Source
 from app.infrastructure.events.publishers import RedisEventPublisher
+from app.infrastructure.layout.cached_reader import CachedDocumentLayoutReader
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 from app.infrastructure.source_connectors.manual_upload_connector import ManualUploadConnector
-from app.infrastructure.source_connectors.url_connector import UrlConnector
+from app.infrastructure.source_connectors.url_connector import UrlConnector, build_url_connector
 from app.infrastructure.storage.s3_storage import S3FileStorage
 
 
@@ -27,7 +28,13 @@ def get_storage() -> S3FileStorage:
 
 @functools.cache
 def get_parser_registry() -> DocumentParserRegistry:
-    return DocumentParserRegistry()
+    return DocumentParserRegistry(pdf_max_pages=get_settings().pdf_max_pages)
+
+
+@functools.cache
+def get_document_layout_reader() -> CachedDocumentLayoutReader:
+    # Тот же кэш разбора, что у API: редактор и анализ не разбирают один PDF дважды.
+    return CachedDocumentLayoutReader(get_parser_registry(), get_storage())
 
 
 @functools.cache
@@ -37,7 +44,7 @@ def _get_manual_connector() -> ManualUploadConnector:
 
 @functools.cache
 def _get_url_connector() -> UrlConnector:
-    return UrlConnector()
+    return build_url_connector(get_settings())
 
 
 def get_connector_for(source_kind: SourceKind) -> SourceConnector:

@@ -40,17 +40,19 @@ def _iter_table(table: Table) -> Iterator[DocxParagraph]:
                     yield from _iter_table(item)
 
 
-def iter_docx_body(document: Any) -> Iterator[Paragraph | list[list[str]]]:
-    """Тело документа для источника: абзацы как есть, таблица — строками ячеек.
+def iter_docx_body_items(document: Any) -> Iterator[Paragraph | Table]:
+    """Элементы тела в порядке документа: абзацы и таблицы верхнего уровня."""
+    yield from document.iter_inner_content()
 
-    Для источника важна связь «ячейка ↔ строка» («Цена | 100 руб.»), поэтому таблица
-    отдаётся целиком, а не абзацами ячеек, как в iter_docx_paragraphs. O(P).
-    """
-    for item in document.iter_inner_content():
-        if isinstance(item, Paragraph):
-            yield item
-        else:
-            yield [_row_cells(row._tr.tc_lst, item) for row in item.rows]
+
+def iter_table_paragraphs(table: Table) -> Iterator[DocxParagraph]:
+    """Абзацы таблицы в том же порядке, в каком их выдаёт iter_docx_paragraphs."""
+    return _iter_table(table)
+
+
+def table_rows(table: Table) -> list[list[str]]:
+    """Таблица строками ячеек: для источника важна связь «ячейка ↔ строка» («Цена | 100 руб.»)."""
+    return [_row_cells(row._tr.tc_lst, table) for row in table.rows]
 
 
 def _row_cells(tcs: list[Any], table: Table) -> list[str]:

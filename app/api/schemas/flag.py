@@ -2,9 +2,11 @@
 
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+from app.api.schemas.geometry import PageGeometryResponse
 
 
 class FlagQuoteResponse(BaseModel):
@@ -12,6 +14,14 @@ class FlagQuoteResponse(BaseModel):
 
     source_name: str = Field(description="Имя источника, как его вернул конвейер")
     text: str
+    # Поля основания есть у флагов анализов, прошедших локатор (см. EvidenceResponse).
+    source_id: uuid.UUID | None = None
+    snapshot_id: uuid.UUID | None = None
+    match: Literal["exact", "approximate", "not_found"] | None = None
+    start_offset: int | None = None
+    end_offset: int | None = None
+    segment_index: int | None = None
+    locator: dict[str, Any] | None = None
 
 
 class AnalysisFlagResponse(BaseModel):
@@ -32,6 +42,9 @@ class AnalysisFlagResponse(BaseModel):
     rationale: str | None = None
     quotes: list[FlagQuoteResponse] = []
     position: int = Field(description="Порядок флага в ответе конвейера")
+    geometry: PageGeometryResponse | None = Field(
+        default=None, description="Только у PDF: блок флага на страницах оригинала"
+    )
     status: Literal["pending", "reviewed"]
     decided_by: uuid.UUID | None = None
     decided_at: datetime | None = None

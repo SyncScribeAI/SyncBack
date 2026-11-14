@@ -1,6 +1,11 @@
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    # source_text сам импортирует DocumentBlockType отсюда.
+    from app.domain.interfaces.document_geometry import DocumentGeometry
+    from app.domain.source_text import SourceLayout
 
 
 @dataclass
@@ -59,6 +64,10 @@ class DocumentParser(Protocol):
         """Текст файла как источника в едином формате (см. app.domain.source_text)."""
         ...
 
+    def extract_source_layout(self, raw_bytes: bytes) -> "SourceLayout":
+        """Тот же текст, что extract_source_text, и положение фрагментов в файле."""
+        ...
+
 
 class IDocumentParserRegistry(Protocol):
     """Выбор парсера по имени файла. Неподдерживаемый формат → UnsupportedFormatError.
@@ -72,3 +81,9 @@ class IDocumentParserRegistry(Protocol):
     def extract_text(self, filename: str, raw_bytes: bytes) -> str: ...
 
     def extract_source_text(self, filename: str, raw_bytes: bytes) -> str: ...
+
+    def extract_source_layout(self, filename: str, raw_bytes: bytes) -> "SourceLayout": ...
+
+    def geometry_for(self, filename: str) -> "DocumentGeometry | None":
+        """Перевод текста в прямоугольники страниц; None для форматов без вёрстки."""
+        ...

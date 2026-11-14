@@ -3,14 +3,20 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.domain.exceptions import UnsupportedFormatError
+from app.domain.interfaces.document_geometry import DocumentGeometry
 from app.domain.interfaces.document_parser import DocumentParser, ParsedDocument
+from app.domain.source_text import SourceLayout
 from app.infrastructure.parsers.docx_parser import DocxParser
+from app.infrastructure.parsers.html_parser import HtmlParser
 from app.infrastructure.parsers.markdown_parser import MarkdownParser
+from app.infrastructure.parsers.pdf_parser import DEFAULT_PDF_MAX_PAGES, PdfiumGeometry, PdfParser
 from app.infrastructure.parsers.txt_parser import TxtParser
 
 # Поддерживаемые форматы:
 #   .docx  — Office OpenXML (python-docx)
 #   .md / .markdown — Markdown
+#   .html / .htm — сохранённая страница, только как источник (основное содержимое)
+#   .pdf  — PDF с текстовым слоем (PDFium)
 #   .txt и всё остальное — plain text
 #
 # .doc (OLE2 / Word 97-2003) НЕ поддерживается: python-docx работает только
@@ -33,13 +39,19 @@ class DocumentParserRegistry:
         ".docx": "_docx_parser",
         ".md": "_markdown_parser",
         ".markdown": "_markdown_parser",
+        ".html": "_html_parser",
+        ".htm": "_html_parser",
+        ".pdf": "_pdf_parser",
     }
     # Отсутствующие суффиксы → fallback на TxtParser.
 
-    def __init__(self) -> None:
+    def __init__(self, pdf_max_pages: int = DEFAULT_PDF_MAX_PAGES) -> None:
         self._docx_parser = DocxParser()
         self._txt_parser = TxtParser()
         self._markdown_parser = MarkdownParser()
+        self._html_parser = HtmlParser()
+        self._pdf_parser = PdfParser(pdf_max_pages)
+        self._pdf_geometry = PdfiumGeometry(self._pdf_parser)
 
     def _get_parser_for_suffix(self, suffix: str) -> str | None:
         """Имя атрибута парсера для суффикса или None, если формат не поддерживается."""
@@ -53,6 +65,13 @@ class DocumentParserRegistry:
 
     def extract_source_text(self, filename: str, raw_bytes: bytes) -> str:
         return self._parser_for(filename).extract_source_text(raw_bytes)
+
+    def extract_source_layout(self, filename: str, raw_bytes: bytes) -> SourceLayout:
+        return self._parser_for(filename).extract_source_layout(raw_bytes)
+
+    def geometry_for(self, filename: str) -> DocumentGeometry | None:
+        """Геометрия есть только у PDF: у остальных форматов нет страниц с координатами."""
+        return self._pdf_geometry if Path(filename).suffix.lower() == ".pdf" else None
 
     def _parser_for(self, filename: str) -> DocumentParser:
         suffix = Path(filename).suffix.lower()

@@ -31,10 +31,13 @@ from app.domain.interfaces.document_analyzer import (
     ProposedChange,
 )
 from app.domain.interfaces.source_connector import SourceRef
+from app.domain.source_text import SourceLayout
 from app.infrastructure.db.models.analysis_job import AnalysisJob
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.suggestion import Suggestion
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
+from app.infrastructure.layout.cached_reader import CachedDocumentLayoutReader
+from app.workers.tasks.runtime import get_parser_registry
 from app.domain.value_objects import DocumentStatusVO
 from tests.contract.conftest import (
     InMemoryFileStorage,
@@ -108,6 +111,9 @@ class FakeConnector:
             raise ConnectionError("источник недоступен")
         return self.texts.get(source.name, f"Решения: срок ответа 5 рабочих дней ({source.name})")
 
+    async def fetch_layout(self, source: SourceRef) -> SourceLayout:
+        return SourceLayout(await self.fetch_structured(source))
+
 
 @dataclass
 class Worker:
@@ -141,6 +147,8 @@ def worker(
     connector = FakeConnector()
     monkeypatch.setattr(v2, "uow_factory", uow_factory)
     monkeypatch.setattr(v2, "get_storage", lambda: file_storage)
+    reader = CachedDocumentLayoutReader(get_parser_registry(), file_storage)
+    monkeypatch.setattr(v2, "get_document_layout_reader", lambda: reader)
     monkeypatch.setattr(v2, "get_connector_for", lambda kind: connector)
     monkeypatch.setattr(v2, "event_publisher", Recorder)
     monkeypatch.setattr(v2, "_get_analyzer", lambda: analyzer)
@@ -490,7 +498,10 @@ async def test_payloads_are_stored_only_when_enabled(
 
     await v2.analyze_document(job_id, source_ids, 0)
 
-    stored = sorted(set(worker.uploads) - keys_before)
+    # Снимки источников пишутся всегда и проверяются отдельным тестом.
+    stored = sorted(
+        key for key in set(worker.uploads) - keys_before if key.startswith("analysis_runs/")
+    )
     assert stored == [
         f"analysis_runs/{job_id}/0.request.json",
         f"analysis_runs/{job_id}/0.response.json",
@@ -572,6 +583,12 @@ async def test_suggestions_are_bound_to_blocks_and_keep_pipeline_order(
         "contract_version": "2.0",
         "provider": v2._settings.analysis_provider,
         "meta": {"checked_blocks": 2, "errors": 0, "llm_seconds": 1.5},
+        "evidence": {
+            "evidence_exact": 0,
+            "evidence_approximate": 0,
+            "evidence_not_found": 0,
+            "evidence_unparsed": 0,
+        },
     }
 
 
@@ -787,3 +804,168 @@ async def test_pipeline_timeout_is_logged(
     [record] = _call_records(caplog)
     assert record.__dict__["outcome"] == "timeout"
     assert "suggestions" not in record.__dict__
+
+
+async def test_success_stores_source_snapshots_and_serves_their_text(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,  # noqa: F811
+    worker: Worker,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.domain.source_snapshot import JobSourceStatus, unpack_fingerprints
+    from app.infrastructure.db.repositories.source_snapshot_repository import (
+        SourceSnapshotRepository,
+    )
+
+    headers, project_id, _, job_id, source_ids = await _start(client, queue, ["A", "B", "C"])
+    worker.connector.texts = {"A": "Одинаковый текст", "B": "Одинаковый текст"}
+    worker.connector.broken = {"C"}
+
+    await v2.analyze_document(job_id, source_ids, 0)
+
+    async with sessionmaker() as session:
+        rows = await SourceSnapshotRepository(session).list_job_sources(uuid.UUID(job_id))
+    assert [row.position for row in rows] == [0, 1, 2]
+    by_name = {row.name: row for row in rows}
+    assert by_name["C"].status is JobSourceStatus.FAILED and by_name["C"].snapshot is None
+    snapshot_a, snapshot_b = by_name["A"].snapshot, by_name["B"].snapshot
+    assert snapshot_a is not None and snapshot_b is not None
+    # Одинаковый текст двух источников хранится одним снимком.
+    assert snapshot_a.id == snapshot_b.id
+    assert worker.uploads[snapshot_a.storage_key] == "Одинаковый текст".encode()
+    fp_key = snapshot_a.storage_key.removesuffix(".txt") + ".fp"
+    assert len(unpack_fingerprints(worker.uploads[fp_key])) == snapshot_a.segments == 1
+
+    response = await client.get(
+        f"/api/v1/projects/{project_id}/source-snapshots/{snapshot_a.id}/content",
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["text"] == "Одинаковый текст"
+    assert response.json()["chars"] == len("Одинаковый текст")
+
+    other_project = await create_project(client, headers)
+    response = await client.get(
+        f"/api/v1/projects/{other_project}/source-snapshots/{snapshot_a.id}/content",
+        headers=headers,
+    )
+    assert response.status_code == 404
+
+
+async def test_deleting_document_removes_unreferenced_snapshots(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,  # noqa: F811
+    worker: Worker,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.infrastructure.db.models.source_snapshot import SourceSnapshotModel
+
+    headers, project_id, document_id, job_id, source_ids = await _start(client, queue, ["A"])
+    await v2.analyze_document(job_id, source_ids, 0)
+    async with sessionmaker() as session:
+        [snapshot] = (await session.execute(select(SourceSnapshotModel))).scalars().all()
+    assert snapshot.storage_key in worker.uploads
+
+    response = await client.delete(
+        f"/api/v1/projects/{project_id}/documents/{document_id}", headers=headers
+    )
+    assert response.status_code == 204, response.text
+
+    async with sessionmaker() as session:
+        assert (await session.execute(select(SourceSnapshotModel))).scalars().all() == []
+    assert snapshot.storage_key not in worker.uploads
+
+
+async def test_retry_reuses_snapshot_objects_and_writes_rows_once(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,  # noqa: F811
+    worker: Worker,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    file_storage: InMemoryFileStorage,
+) -> None:
+    from app.infrastructure.db.models.source_snapshot import (
+        AnalysisJobSourceSnapshot,
+        SourceSnapshotModel,
+    )
+
+    _, _, _, job_id, source_ids = await _start(client, queue, ["A"])
+    worker.analyzer.failures = [LLMTimeoutError("таймаут")]
+    uploads: list[str] = []
+    original_upload = file_storage.upload
+
+    async def counting_upload(key: str, content: object) -> None:
+        uploads.append(key)
+        await original_upload(key, content)  # type: ignore[arg-type]
+
+    file_storage.upload = counting_upload  # type: ignore[method-assign]
+
+    assert isinstance(await v2.analyze_document(job_id, source_ids, 0), v2.RetryLater)
+    assert await v2.analyze_document(job_id, source_ids, 1) is None
+
+    assert len([key for key in uploads if key.startswith("source_snapshots/")]) == 2
+    async with sessionmaker() as session:
+        assert len((await session.execute(select(SourceSnapshotModel))).scalars().all()) == 1
+        rows = (await session.execute(select(AnalysisJobSourceSnapshot))).scalars().all()
+    assert [(row.position, row.status) for row in rows] == [(0, "fetched")]
+
+
+def _quoted_deadline(request: AnalysisRequest) -> AnalysisResult:
+    from app.domain.evidence import Quote
+
+    return AnalysisResult(
+        status=AnalysisStatus.COMPLETED,
+        suggestions=(
+            ProposedChange(
+                kind="modify",
+                block_ref=_block_ref(request, "10 рабочих"),
+                old_text="10 рабочих дней",
+                new_text="5 рабочих дней",
+                rationale="Источник: «срок ответа — 5 рабочих дней» (A)",
+                quotes=(
+                    Quote("A", "срок ответа:  5 рабочих дней"),
+                    Quote("A", "этой фразы в источнике нет совсем"),
+                ),
+            ),
+        ),
+    )
+
+
+async def test_suggestion_cites_only_quoted_source_and_shows_evidence(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,  # noqa: F811
+    worker: Worker,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    headers, project_id, document_id, job_id, source_ids = await _start(client, queue, ["A", "B"])
+    worker.analyzer.respond = _quoted_deadline
+    worker.connector.texts = {"A": "# Решения\n\nСрок ответа: 5 рабочих дней.", "B": "Другое"}
+
+    await v2.analyze_document(job_id, source_ids, 0)
+
+    [suggestion] = await _suggestions(sessionmaker)
+    assert [s.name for s in suggestion.sources] == ["A"]
+    job = await _job(sessionmaker, job_id)
+    assert job.pipeline_meta["evidence"] == {
+        "evidence_exact": 1,
+        "evidence_approximate": 0,
+        "evidence_not_found": 1,
+        "evidence_unparsed": 0,
+    }
+
+    response = await client.get(
+        f"/api/v1/projects/{project_id}/documents/{document_id}/suggestions", headers=headers
+    )
+    assert response.status_code == 200, response.text
+    found, missing = response.json()["items"][0]["evidence"]
+    assert (found["source_name"], found["match"]) == ("A", "exact")
+    snapshot = await client.get(
+        f"/api/v1/projects/{project_id}/source-snapshots/{found['snapshot_id']}/content",
+        headers=headers,
+    )
+    text = snapshot.json()["text"]
+    assert text[found["start_offset"] : found["end_offset"]] == "Срок ответа: 5 рабочих дней"
+    assert found["segment_index"] == 1
+    # Заметка не файл .docx, но её storage_key не менялся: оригинал тот же.
+    assert found["original_file_available"] is True
+    assert (missing["match"], missing["start_offset"]) == ("not_found", None)
+    assert "file_storage_key" not in found

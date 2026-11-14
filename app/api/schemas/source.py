@@ -54,6 +54,13 @@ class SourceResponse(BaseModel):
     scope: Literal["project", "document"]
     url: str | None = None
     created_at: datetime
+    pages_without_text: list[int] | None = Field(
+        default=None,
+        description=(
+            "Только в ответе на загрузку PDF: страницы без текстового слоя (с единицы). "
+            "Файл принят, но текст этих страниц в анализ не попадёт"
+        ),
+    )
 
     model_config = {"from_attributes": True}
 
@@ -91,3 +98,11 @@ class SourceContentResponse(BaseModel):
     reason: str | None = None
 
     _normalise_type = field_validator("type", mode="before")(_enum_value)
+
+
+class SourceCheckResponse(BaseModel):
+    """Итог пробной загрузки источника: ничего не сохраняется."""
+
+    ok: bool
+    chars: int
+    error: str | None = None

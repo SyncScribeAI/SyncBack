@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
+from app.domain.source_text import SourceLayout
+
 
 class SourceKind(enum.StrEnum):
     FILE = "file"
@@ -46,6 +48,14 @@ class SourceConnector(Protocol):
         """Текст источника в едином формате для ML (см. app.domain.source_text).
 
         fetch остаётся для текущего LLM-конвейера: его промпт рассчитан на прежний текст.
+        """
+        ...
+
+    async def fetch_layout(self, source: SourceRef) -> SourceLayout:
+        """Текст fetch_structured и положение его фрагментов в исходном файле.
+
+        Положение нужно подсветке основания в оригинале; коннектор, который его не знает,
+        возвращает текст с пустым spans.
         """
         ...
 

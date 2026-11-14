@@ -71,7 +71,11 @@ class PluginAnalyzer:
             raise LLMInvalidResponseError(
                 f"ML-плагин вернул {type(raw).__name__}, ожидался dict ответа контракта"
             )
-        return decode_response(raw, expected_request_id=request.request_id)
+        return decode_response(
+            raw,
+            expected_request_id=request.request_id,
+            source_names=[source.name for source in request.sources],
+        )
 
     async def health_check(self) -> bool:
         # Callable загружен при создании адаптера; модель за ним проверить нечем, не

@@ -40,7 +40,7 @@ import logging
 import time
 import uuid
 from collections.abc import Callable, Coroutine, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import pydantic_core
@@ -48,6 +48,7 @@ from celery import Task
 from celery.exceptions import SoftTimeLimitExceeded
 
 from app.core.config import get_settings
+from app.domain.evidence import EvidenceSource, evidence_sources_of
 from app.domain.exceptions import (
     LLMInputTooLargeError,
     LLMInvalidResponseError,
@@ -65,6 +66,11 @@ from app.domain.lifecycle import AnalysisJobLifecycle
 from app.domain.pipeline_run import PipelineRunSummary, summarize_run
 from app.domain.services.analysis_request_builder import DocumentInput, build_analysis_request
 from app.domain.services.analysis_result_mapper import FlagDraft, SuggestionDraft, map_result
+from app.domain.services.evidence_locator import (
+    EvidenceLocator,
+    LocatedSource,
+    attach_evidence,
+)
 from app.domain.services.suggestion_groups import PropagationLimits, finalize_drafts
 from app.domain.source_snapshot import (
     JobSourceRecord,
@@ -74,7 +80,7 @@ from app.domain.source_snapshot import (
     fingerprints_storage_key,
     pack_fingerprints,
 )
-from app.domain.source_text import ensure_source_fits
+from app.domain.source_text import SourceLayout, ensure_source_fits
 from app.domain.value_objects import AnalysisJobStatusVO
 from app.infrastructure.db.session import isolated_uow
 from app.infrastructure.ml_pipeline.factory import analysis_limits, get_document_analyzer
@@ -154,6 +160,8 @@ class _FetchedSources:
     # Строки задачи в порядке источников запроса и снимки удачно загруженных текстов.
     records: list[JobSourceRecord] = field(default_factory=list)
     snapshots: list[SnapshotDraft] = field(default_factory=list)
+    # Положение фрагментов в исходных файлах; параллельно payloads.
+    layouts: list[SourceLayout] = field(default_factory=list)
 
 
 async def analyze_document(
@@ -216,6 +224,16 @@ async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
         raise _JobFailed(outcome.error_code or "LLM_UNAVAILABLE", outcome.error_message or "", run)
 
     drafts, flags = _map(job.id, attempt, result, request)
+    job_sources = _numbered(fetched.records)
+    drafts, flags, counters = attach_evidence(
+        drafts,
+        flags,
+        EvidenceLocator(
+            _located_sources(fetched, job_sources), _settings.analysis_evidence_min_containment
+        ),
+    )
+    run = replace(run, evidence=counters.as_meta())
+    logger.info("Анализ v2: основания правок", extra={"job_id": str(job.id), **counters.as_meta()})
     await finish(
         job.id,
         outcome.status,
@@ -226,9 +244,32 @@ async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
         source_ids=fetched.ids,
         run=run,
         snapshots=fetched.snapshots,
-        job_sources=_numbered(fetched.records),
+        job_sources=job_sources,
     )
     return None
+
+
+def _located_sources(
+    fetched: _FetchedSources, job_sources: Sequence[JobSourceRecord]
+) -> list[LocatedSource]:
+    """Источники запроса с номерами строк задачи: по номеру основание найдёт свой снимок."""
+    positions = {
+        record.source_id: record.position
+        for record in job_sources
+        if record.status is JobSourceStatus.FETCHED and record.source_id is not None
+    }
+    return [
+        LocatedSource(
+            position=positions[source_id],
+            source_id=payload.id,
+            name=payload.name,
+            text=payload.text,
+            spans=layout.spans,
+        )
+        for source_id, payload, layout in zip(
+            fetched.ids, fetched.payloads, fetched.layouts, strict=True
+        )
+    ]
 
 
 async def _start(job_id: uuid.UUID, source_ids: Sequence[str], attempt: int) -> _StartedJob | None:
@@ -315,11 +356,11 @@ async def _fetch_sources(refs: Sequence[SourceRef], project_id: uuid.UUID) -> _F
     semaphore = asyncio.Semaphore(_settings.analysis_source_fetch_concurrency)
     max_chars = _settings.analysis_max_source_chars
 
-    async def fetch(ref: SourceRef) -> str:
+    async def fetch(ref: SourceRef) -> SourceLayout:
         async with semaphore:
-            text = await get_connector_for(ref.type).fetch_structured(ref)
-        ensure_source_fits(ref.name, text, max_chars)
-        return text
+            layout = await get_connector_for(ref.type).fetch_layout(ref)
+        ensure_source_fits(ref.name, layout.text, max_chars)
+        return layout
 
     results = await asyncio.gather(*(fetch(ref) for ref in refs), return_exceptions=True)
     fetched = _FetchedSources()
@@ -339,12 +380,13 @@ async def _fetch_sources(refs: Sequence[SourceRef], project_id: uuid.UUID) -> _F
             )
             continue
         fetched.payloads.append(
-            SourcePayload(id=str(ref.id), name=ref.name, type=ref.type, text=result)
+            SourcePayload(id=str(ref.id), name=ref.name, type=ref.type, text=result.text)
         )
+        fetched.layouts.append(result)
         fetched.ids.append(ref.id)
         # Снимок считается от того же текста, что уходит в запрос: цитаты модели
         # относятся именно к нему.
-        snapshot = SnapshotDraft.of(project_id, result)
+        snapshot = SnapshotDraft.of(project_id, result.text)
         fetched.snapshots.append(snapshot)
         fetched.records.append(
             JobSourceRecord(
@@ -561,15 +603,28 @@ async def finish(
             return False
         if run is not None:
             await uow.jobs.record_pipeline_run(job, run)
-        if drafts:
-            sources = await uow.sources.get_many_by_ids(list(source_ids))
-            await uow.suggestions.bulk_create(
-                to_suggestions(drafts, job_id=job.id, document_id=document.id, sources=sources)
-            )
-        await uow.flags.bulk_create(to_flags(flags, job_id=job.id, document_id=document.id))
+        # Снимки пишутся первыми: основания правок и флагов ссылаются на их id.
+        evidence_sources: dict[int, EvidenceSource] = {}
         if job_sources:
             snapshot_ids = await uow.snapshots.ensure_snapshots(distinct_drafts(snapshots))
             await uow.snapshots.add_job_sources(job.id, job_sources, snapshot_ids)
+            evidence_sources = evidence_sources_of(job_sources, snapshot_ids)
+        if drafts:
+            sources = await uow.sources.get_many_by_ids(list(source_ids))
+            await uow.suggestions.bulk_create(
+                to_suggestions(
+                    drafts,
+                    job_id=job.id,
+                    document_id=document.id,
+                    sources=sources,
+                    evidence_sources=evidence_sources,
+                )
+            )
+        await uow.flags.bulk_create(
+            to_flags(
+                flags, job_id=job.id, document_id=document.id, evidence_sources=evidence_sources
+            )
+        )
         outbox = await complete_job(
             uow,
             job,

@@ -16,7 +16,11 @@ _MARK = " (проверено заглушкой ML)"
 
 class StubAnalyzer:
     async def analyze(self, request: AnalysisRequest) -> AnalysisResult:
-        return decode_response(stub_response(request), expected_request_id=request.request_id)
+        return decode_response(
+            stub_response(request),
+            expected_request_id=request.request_id,
+            source_names=[source.name for source in request.sources],
+        )
 
     async def health_check(self) -> bool:
         return True

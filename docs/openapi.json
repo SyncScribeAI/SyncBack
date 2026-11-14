@@ -4453,6 +4453,119 @@
         ],
         "title": "EditorPermissions"
       },
+      "EvidenceResponse": {
+        "properties": {
+          "source_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Id",
+            "description": "Источник цитаты; None, если источник не определён или удалён"
+          },
+          "source_name": {
+            "type": "string",
+            "title": "Source Name",
+            "description": "Имя источника на момент анализа или из цитаты"
+          },
+          "snapshot_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Id",
+            "description": "Снимок источника, в котором искалась цитата: GET /api/v1/projects/{project_id}/source-snapshots/{snapshot_id}/content"
+          },
+          "quote": {
+            "type": "string",
+            "title": "Quote",
+            "description": "Цитата в том виде, в каком её вернул конвейер"
+          },
+          "match": {
+            "type": "string",
+            "enum": [
+              "exact",
+              "approximate",
+              "not_found"
+            ],
+            "title": "Match",
+            "description": "exact — найден диапазон цитаты; approximate — цитата пересказана, диапазон покрывает сегмент; not_found — места в снимке нет"
+          },
+          "start_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Offset",
+            "description": "Начало в тексте снимка, в символах Unicode"
+          },
+          "end_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Offset",
+            "description": "Конец в тексте снимка, не включая"
+          },
+          "segment_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Segment Index",
+            "description": "Номер сегмента снимка"
+          },
+          "locator": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locator",
+            "description": "Место в исходном файле. docx_paragraphs: first и last, порядковые номера непустых абзацев файла, оба включены"
+          },
+          "original_file_available": {
+            "type": "boolean",
+            "title": "Original File Available",
+            "description": "Файл источника тот же, что разбирался при анализе: подсветку можно показать в оригинале; иначе только в тексте снимка",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "source_name",
+          "quote",
+          "match"
+        ],
+        "title": "EvidenceResponse",
+        "description": "Цитата источника, на которой основана правка, и её место в снимке источника."
+      },
       "ExportCapabilities": {
         "properties": {
           "endpoint": {
@@ -4487,6 +4600,91 @@
           "text": {
             "type": "string",
             "title": "Text"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Id"
+          },
+          "snapshot_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Id"
+          },
+          "match": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "exact",
+                  "approximate",
+                  "not_found"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Match"
+          },
+          "start_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Offset"
+          },
+          "end_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Offset"
+          },
+          "segment_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Segment Index"
+          },
+          "locator": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locator"
           }
         },
         "type": "object",
@@ -5772,6 +5970,14 @@
             "title": "Origin",
             "description": "model — правка конвейера; propagated — найдена бэкендом по точному повтору",
             "default": "model"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceResponse"
+            },
+            "type": "array",
+            "title": "Evidence",
+            "description": "Основания правки; пусто, если цитаты не извлеклись или анализ старый"
           },
           "status": {
             "type": "string",

@@ -2,7 +2,7 @@
 
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -12,6 +12,14 @@ class FlagQuoteResponse(BaseModel):
 
     source_name: str = Field(description="Имя источника, как его вернул конвейер")
     text: str
+    # Поля основания есть у флагов анализов, прошедших локатор (см. EvidenceResponse).
+    source_id: uuid.UUID | None = None
+    snapshot_id: uuid.UUID | None = None
+    match: Literal["exact", "approximate", "not_found"] | None = None
+    start_offset: int | None = None
+    end_offset: int | None = None
+    segment_index: int | None = None
+    locator: dict[str, Any] | None = None
 
 
 class AnalysisFlagResponse(BaseModel):

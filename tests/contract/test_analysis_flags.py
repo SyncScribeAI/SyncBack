@@ -102,7 +102,8 @@ async def test_flags_are_stored_in_pipeline_order_and_shown_in_editor(
     assert first["original_text"] == "Оплата принимается картой."
     assert first["original_text"] in body["content"]["plain_text"]
     assert first["block_id"] in blocks
-    assert first["quotes"] == [
+    # Поля основания необязательные; здесь проверяется прежняя часть цитаты.
+    assert [{"source_name": q["source_name"], "text": q["text"]} for q in first["quotes"]] == [
         {"source_name": "A", "text": "только картой"},
         {"source_name": "B", "text": "и наличными"},
     ]

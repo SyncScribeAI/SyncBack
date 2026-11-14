@@ -13,12 +13,13 @@ payload), ответ разбирается за один проход model_val
 json.loads.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
 import pydantic_core
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from app.domain.evidence import Quote
 from app.domain.exceptions import LLMInvalidResponseError
 from app.domain.interfaces.document_analyzer import (
     AnalysisError,
@@ -26,10 +27,10 @@ from app.domain.interfaces.document_analyzer import (
     AnalysisRequest,
     AnalysisResult,
     AnalysisStatus,
-    FlagQuote,
     ProposedChange,
     ReviewFlag,
 )
+from app.infrastructure.ml_pipeline.rationale_quotes import parse_rationale_quotes
 
 CONTRACT_VERSION = "2.0"
 _KNOWN_ERROR_CODES = frozenset(code.value for code in AnalysisErrorCode)
@@ -76,6 +77,15 @@ class _Schema(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
 
+class _QuoteSchema(_Schema):
+    source: str = ""
+    source_id: str | None = None
+    text: str = ""
+
+    def to_quote(self) -> Quote:
+        return Quote(source_name=self.source, text=self.text, source_id=self.source_id)
+
+
 class _SuggestionSchema(_Schema):
     change_type: str
     target_block_id: str
@@ -84,11 +94,14 @@ class _SuggestionSchema(_Schema):
     insert_after: str | None = None
     rationale: str | None = None
     confidence_score: float | None = None
+    # В контракте 2.0 поля нет; когда harness начнёт его отдавать, оно важнее разбора
+    # строки обоснования.
+    quotes: list[_QuoteSchema] | None = None
 
-
-class _QuoteSchema(_Schema):
-    source: str = ""
-    text: str = ""
+    def to_quotes(self, source_names: Sequence[str]) -> tuple[Quote, ...]:
+        if self.quotes is not None:
+            return tuple(quote.to_quote() for quote in self.quotes if quote.text.strip())
+        return parse_rationale_quotes(self.rationale, source_names)
 
 
 class _FlagSchema(_Schema):
@@ -115,12 +128,17 @@ class _ResponseSchema(_Schema):
 
 
 def decode_response(
-    raw: bytes | str | Mapping[str, Any], *, expected_request_id: str | None = None
+    raw: bytes | str | Mapping[str, Any],
+    *,
+    expected_request_id: str | None = None,
+    source_names: Sequence[str] = (),
 ) -> AnalysisResult:
     """Ответ ML → AnalysisResult; ответ не по контракту → LLMInvalidResponseError.
 
     request_id сверяется, чтобы опоздавший ответ на прошлую попытку не был принят за
     текущий. Отсутствующий request_id допустим: контракт возвращает null, если его не было.
+    source_names помогают разобрать цитаты в обосновании: имя источника может содержать
+    скобки, и без списка имён граница цитаты неоднозначна.
     """
     try:
         if isinstance(raw, bytes | str):
@@ -135,7 +153,7 @@ def decode_response(
         and parsed.request_id != expected_request_id
     ):
         raise LLMInvalidResponseError("Ответ ML относится к другому запросу (request_id)")
-    return _to_result(parsed)
+    return _to_result(parsed, source_names)
 
 
 def _describe(exc: ValidationError) -> str:
@@ -146,7 +164,7 @@ def _describe(exc: ValidationError) -> str:
     return f"Ответ ML не по контракту {CONTRACT_VERSION}: ошибок {len(errors)}, первая — {location} ({first['type']})"
 
 
-def _to_result(parsed: _ResponseSchema) -> AnalysisResult:
+def _to_result(parsed: _ResponseSchema, source_names: Sequence[str]) -> AnalysisResult:
     if parsed.status == "failed":
         error = parsed.error or _ErrorSchema()
         code = (
@@ -170,6 +188,7 @@ def _to_result(parsed: _ResponseSchema) -> AnalysisResult:
                 anchor_text=item.insert_after,
                 rationale=item.rationale,
                 confidence=item.confidence_score,
+                quotes=item.to_quotes(source_names),
             )
             for item in parsed.suggestions
         ),
@@ -179,7 +198,7 @@ def _to_result(parsed: _ResponseSchema) -> AnalysisResult:
                 block_ref=flag.target_block_id,
                 block_text=flag.old_text,
                 rationale=flag.rationale,
-                quotes=tuple(FlagQuote(quote.source, quote.text) for quote in flag.quotes),
+                quotes=tuple(quote.to_quote() for quote in flag.quotes),
             )
             for flag in parsed.flags
         ),

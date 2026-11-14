@@ -6,8 +6,9 @@
 от формата файла, а сравнение «документ ↔ источник» опирается на одинаковую разметку.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from app.domain.exceptions import LLMInputTooLargeError
 from app.domain.interfaces.document_parser import DocumentBlockType
@@ -35,6 +36,51 @@ def serialize_source(fragments: Iterable[SourceFragment]) -> str:
         if text:
             parts.append(_format(fragment.type, text, fragment.heading_level))
     return _BLOCK_SEPARATOR.join(parts)
+
+
+@dataclass(frozen=True, slots=True)
+class FragmentSpan:
+    """Где фрагмент стоит в тексте источника и где он стоит в исходном файле.
+
+    locator описывает место в файле в терминах формата, например диапазон порядковых
+    номеров непустых абзацев DOCX. По нему просмотр подсвечивает основание в оригинале.
+    """
+
+    start: int
+    end: int
+    locator: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class SourceLayout:
+    """Текст источника вместе с положением фрагментов в исходном файле.
+
+    spans упорядочены по start; пустой кортеж значит, что формат положения не знает
+    (текст, Markdown, страница по ссылке) и подсветка идёт только по тексту снимка.
+    """
+
+    text: str
+    spans: tuple[FragmentSpan, ...] = ()
+
+
+def serialize_source_layout(
+    fragments: Iterable[tuple[SourceFragment, Mapping[str, Any]]],
+) -> SourceLayout:
+    """Тот же текст, что serialize_source, и диапазон каждого фрагмента в нём. O(M)."""
+    parts: list[str] = []
+    spans: list[FragmentSpan] = []
+    offset = 0
+    for fragment, locator in fragments:
+        text = fragment.text.strip()
+        if not text:
+            continue
+        if parts:
+            offset += len(_BLOCK_SEPARATOR)
+        formatted = _format(fragment.type, text, fragment.heading_level)
+        parts.append(formatted)
+        spans.append(FragmentSpan(offset, offset + len(formatted), locator))
+        offset += len(formatted)
+    return SourceLayout(_BLOCK_SEPARATOR.join(parts), tuple(spans))
 
 
 def _format(block_type: DocumentBlockType, text: str, heading_level: int | None) -> str:

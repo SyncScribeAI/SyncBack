@@ -42,6 +42,7 @@ from app.domain.exceptions import (
     SourceRequiresAuthError,
 )
 from app.domain.interfaces.source_connector import SourceKind, SourceMetadata, SourceRef
+from app.domain.source_text import SourceLayout
 from app.domain.source_url import (
     DEFAULT_SOURCE_URL_POLICY,
     IpAddress,
@@ -162,6 +163,10 @@ class UrlConnector:
 
     async def fetch_structured(self, source: SourceRef) -> str:
         return self._converter.to_source_text(await self.fetch_content(source))
+
+    async def fetch_layout(self, source: SourceRef) -> SourceLayout:
+        # Страница не файл: подсветка идёт по тексту снимка, положения в оригинале нет.
+        return SourceLayout(await self.fetch_structured(source))
 
     async def fetch_content(self, source: SourceRef) -> FetchedContent:
         """Байты страницы с типом и итоговым адресом, без преобразования в текст."""

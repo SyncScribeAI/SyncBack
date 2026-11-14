@@ -134,6 +134,11 @@ class Suggestion(Base):
         ForeignKey("suggestions.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Решение перенесено из прошлой задачи, а основание правки с тех пор изменилось в
+    # источнике: решение стоит пересмотреть.
+    stale: Mapped[bool] = mapped_column(
+        sa.Boolean, nullable=False, default=False, server_default="false"
+    )
 
     analysis_job: Mapped["AnalysisJob"] = relationship(back_populates="suggestions")
     sources: Mapped[list["Source"]] = relationship(secondary="suggestion_sources", lazy="selectin")

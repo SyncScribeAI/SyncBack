@@ -22,21 +22,66 @@ class AnalysisJobCreateRequest(BaseModel):
     )
 
 
-class AnalysisIncrementalInfo(BaseModel):
-    """Как задача получила результат: вызовом ML или переносом из прошлой задачи."""
+class AnalysisDeltaAudit(BaseModel):
+    """Сравнение выборочной задачи с контрольным полным анализом того же входа по блокам."""
 
-    mode: Literal["reused", "full"]
+    blocks_full: int
+    blocks_delta: int
+    missed: int
+    extra: int
+    recall: float
+
+
+class AnalysisIncrementalInfo(BaseModel):
+    """Как задача получила результат: полным анализом, переносом или выборочной проверкой."""
+
+    mode: Literal["reused", "full", "delta"]
     reason: str = Field(
         description=(
             "reused, mode_off, strategy_full, sources_failed, no_baseline или input_changed"
         )
     )
     baseline_job_id: uuid.UUID | None = None
+    chain_length: int | None = Field(
+        default=None, description="Выборочных задач подряд после последнего полного анализа"
+    )
+    fallback_reason: str | None = Field(
+        default=None,
+        description=(
+            "Почему вход проверен полным анализом: причина решения о переносе или предел"
+            " выборочной проверки (changed_share, blocks_share, chain_limit и другие)"
+        ),
+    )
     changed_share: float | None = Field(
         default=None, description="Доля символов источников в новых сегментах"
     )
     segments_added: int | None = None
     segments_removed: int | None = None
+    blocks_selected: int | None = Field(
+        default=None, description="Блоки, проверенные заново выборочной задачей"
+    )
+    selected_by_overlap: int | None = None
+    selected_by_token: int | None = None
+    selected_by_evidence: int | None = None
+    selected_by_flag: int | None = None
+    carried_suggestions: int | None = None
+    carried_flags: int | None = None
+    stale: int | None = Field(
+        default=None, description="Перенесённые решения, основание которых изменилось"
+    )
+    replaced: int | None = Field(
+        default=None, description="Ожидающие правки проверенных блоков, заменённые новым ответом"
+    )
+    inherited: int | None = Field(
+        default=None, description="Новые правки, совпавшие с прошлыми и получившие их решение"
+    )
+    dropped_add: int | None = Field(
+        default=None, description="Добавления, опиравшиеся только на неизменённые сегменты"
+    )
+    evidence_flags: int | None = Field(
+        default=None, description="Флаги «основание удалено из источника»"
+    )
+    audit: AnalysisDeltaAudit | None = None
 
 
 class AnalysisRunStats(BaseModel):

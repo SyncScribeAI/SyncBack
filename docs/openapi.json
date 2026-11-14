@@ -3116,6 +3116,40 @@
         ],
         "title": "AnalysisCapabilities"
       },
+      "AnalysisDeltaAudit": {
+        "properties": {
+          "blocks_full": {
+            "type": "integer",
+            "title": "Blocks Full"
+          },
+          "blocks_delta": {
+            "type": "integer",
+            "title": "Blocks Delta"
+          },
+          "missed": {
+            "type": "integer",
+            "title": "Missed"
+          },
+          "extra": {
+            "type": "integer",
+            "title": "Extra"
+          },
+          "recall": {
+            "type": "number",
+            "title": "Recall"
+          }
+        },
+        "type": "object",
+        "required": [
+          "blocks_full",
+          "blocks_delta",
+          "missed",
+          "extra",
+          "recall"
+        ],
+        "title": "AnalysisDeltaAudit",
+        "description": "Сравнение выборочной задачи с контрольным полным анализом того же входа по блокам."
+      },
       "AnalysisFlagResponse": {
         "properties": {
           "id": {
@@ -3302,7 +3336,8 @@
             "type": "string",
             "enum": [
               "reused",
-              "full"
+              "full",
+              "delta"
             ],
             "title": "Mode"
           },
@@ -3322,6 +3357,30 @@
               }
             ],
             "title": "Baseline Job Id"
+          },
+          "chain_length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chain Length",
+            "description": "Выборочных задач подряд после последнего полного анализа"
+          },
+          "fallback_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fallback Reason",
+            "description": "Почему вход проверен полным анализом: причина решения о переносе или предел выборочной проверки (changed_share, blocks_share, chain_limit и другие)"
           },
           "changed_share": {
             "anyOf": [
@@ -3356,6 +3415,154 @@
               }
             ],
             "title": "Segments Removed"
+          },
+          "blocks_selected": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocks Selected",
+            "description": "Блоки, проверенные заново выборочной задачей"
+          },
+          "selected_by_overlap": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selected By Overlap"
+          },
+          "selected_by_token": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selected By Token"
+          },
+          "selected_by_evidence": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selected By Evidence"
+          },
+          "selected_by_flag": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selected By Flag"
+          },
+          "carried_suggestions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Carried Suggestions"
+          },
+          "carried_flags": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Carried Flags"
+          },
+          "stale": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stale",
+            "description": "Перенесённые решения, основание которых изменилось"
+          },
+          "replaced": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replaced",
+            "description": "Ожидающие правки проверенных блоков, заменённые новым ответом"
+          },
+          "inherited": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inherited",
+            "description": "Новые правки, совпавшие с прошлыми и получившие их решение"
+          },
+          "dropped_add": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dropped Add",
+            "description": "Добавления, опиравшиеся только на неизменённые сегменты"
+          },
+          "evidence_flags": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Flags",
+            "description": "Флаги «основание удалено из источника»"
+          },
+          "audit": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AnalysisDeltaAudit"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -3364,7 +3571,7 @@
           "reason"
         ],
         "title": "AnalysisIncrementalInfo",
-        "description": "Как задача получила результат: вызовом ML или переносом из прошлой задачи."
+        "description": "Как задача получила результат: полным анализом, переносом или выборочной проверкой."
       },
       "AnalysisJobConflictResponse": {
         "properties": {
@@ -6263,6 +6470,25 @@
               }
             ],
             "description": "Только у PDF: где правка на страницах оригинала; None у других форматов"
+          },
+          "carried_from_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Carried From Id",
+            "description": "Правка перенесена из прошлого анализа вместе с решением; id исходной правки"
+          },
+          "stale": {
+            "type": "boolean",
+            "title": "Stale",
+            "description": "Решение перенесено из прошлого анализа, а основание правки с тех пор изменилось в источнике; решение стоит пересмотреть",
+            "default": false
           },
           "status": {
             "type": "string",

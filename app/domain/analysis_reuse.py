@@ -22,8 +22,9 @@ from typing import Any
 
 class IncrementalMode(StrEnum):
     OFF = "off"
+    # Только перенос результата при неизменном входе.
     REUSE = "reuse"
-    # В D1 ведёт себя как reuse и дополнительно считает изменённые сегменты.
+    # Перенос при неизменном входе и выборочная проверка блоков при изменённых источниках.
     DELTA = "delta"
 
 
@@ -43,12 +44,87 @@ class ReuseReason(StrEnum):
     INPUT_CHANGED = "input_changed"
 
 
+class DeltaFallback(StrEnum):
+    """Почему изменённый вход проверен полным анализом, а не выборочно; пишется в meta."""
+
+    MODE_REUSE = "mode_reuse"
+    # Прошлая задача записана до инкрементального режима: неизвестен хэш её документа.
+    BASELINE_UNKNOWN = "baseline_unknown"
+    DOCUMENT_CHANGED = "document_changed"
+    CONTRACT_CHANGED = "contract_changed"
+    PROVIDER_CHANGED = "provider_changed"
+    CHAIN_LIMIT = "chain_limit"
+    FINGERPRINTS_UNAVAILABLE = "fingerprints_unavailable"
+    CHANGED_SHARE = "changed_share"
+    BLOCKS_SHARE = "blocks_share"
+    # Новый текст источника не совпал ни с одним блоком: правка add возможна где угодно.
+    NO_BLOCKS_MATCHED = "no_blocks_matched"
+
+
 @dataclass(frozen=True, slots=True)
 class Baseline:
-    """Прошлая полная задача документа: успешная, без упавших блоков и источников."""
+    """Прошлая полная задача документа: успешная, без упавших блоков и источников.
+
+    chain_length: сколько инкрементальных задач подряд стоит за ней после последнего
+    полного анализа. Поля входа пусты у задач, записанных до инкрементального режима.
+    """
 
     job_id: uuid.UUID
     input_hash: str
+    document_hash: str | None = None
+    contract_version: str | None = None
+    provider: str | None = None
+    chain_length: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class DeltaPolicy:
+    """Пределы, за которыми выборочная проверка теряет смысл; из ANALYSIS_DELTA_*."""
+
+    max_changed_share: float = 0.3
+    max_blocks_share: float = 0.5
+    max_chain: int = 5
+
+
+def delta_precheck(
+    baseline: Baseline,
+    *,
+    mode: IncrementalMode,
+    document_hash: str,
+    contract_version: str,
+    provider: str,
+    policy: DeltaPolicy,
+) -> DeltaFallback | None:
+    """Условия, проверяемые до загрузки отпечатков прошлого входа.
+
+    Изменённый документ, контракт или провайдер меняют смысл всех блоков сразу, и
+    сравнивать источники уже незачем. Предел цепочки ограничивает накопление пропусков:
+    каждая выборочная задача наследует результат предыдущей.
+    """
+    if mode is not IncrementalMode.DELTA:
+        return DeltaFallback.MODE_REUSE
+    if baseline.document_hash is None:
+        return DeltaFallback.BASELINE_UNKNOWN
+    if baseline.document_hash != document_hash:
+        return DeltaFallback.DOCUMENT_CHANGED
+    if baseline.contract_version != contract_version:
+        return DeltaFallback.CONTRACT_CHANGED
+    if baseline.provider != provider:
+        return DeltaFallback.PROVIDER_CHANGED
+    if baseline.chain_length >= policy.max_chain:
+        return DeltaFallback.CHAIN_LIMIT
+    return None
+
+
+def delta_scope_check(
+    *, changed_share: float, selected: int, checkable: int, policy: DeltaPolicy
+) -> DeltaFallback | None:
+    """Большая доля изменений или выбранных блоков: полный анализ надёжнее и не дороже."""
+    if changed_share > policy.max_changed_share:
+        return DeltaFallback.CHANGED_SHARE
+    if checkable and selected > checkable * policy.max_blocks_share:
+        return DeltaFallback.BLOCKS_SHARE
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,7 +237,11 @@ class DeltaSummary:
 
 @dataclass(frozen=True, slots=True)
 class RunInput:
-    """Вход задачи и решение по нему; задача хранит это в pipeline_meta."""
+    """Вход задачи и решение по нему; задача хранит это в pipeline_meta.
+
+    selective: задача проверила заново только часть блоков, остальное перенесено из
+    baseline. selection: счётчики отбора и сведения для meta.
+    """
 
     input_hash: str
     contract_version: str
@@ -169,18 +249,49 @@ class RunInput:
     decision: ReuseDecision
     stats: RunStats
     delta: DeltaSummary | None = None
+    document_hash: str | None = None
+    selective: bool = False
+    fallback: DeltaFallback | None = None
+    selection: Mapping[str, int] | None = None
+
+    @property
+    def mode(self) -> str:
+        if self.decision.reuse:
+            return "reused"
+        return "delta" if self.selective else "full"
+
+    @property
+    def chain_length(self) -> int:
+        """Перенос не прибавляет звена: результат тот же, что у baseline."""
+        baseline = self.decision.baseline
+        if baseline is None or self.mode == "full":
+            return 0
+        return baseline.chain_length + (1 if self.selective else 0)
+
+    @property
+    def baseline_job_id(self) -> uuid.UUID | None:
+        baseline = self.decision.baseline
+        return baseline.job_id if baseline is not None and self.mode != "full" else None
 
     def incremental_meta(self) -> dict[str, Any]:
         baseline = self.decision.baseline
+        fallback: str | None = None
+        if self.mode == "full":
+            fallback = self.fallback.value if self.fallback else self.decision.reason.value
         meta: dict[str, Any] = {
-            "mode": "reused" if self.decision.reuse else "full",
+            "mode": self.mode,
             "reason": self.decision.reason.value,
             "baseline_job_id": str(baseline.job_id) if baseline else None,
+            "chain_length": self.chain_length,
+            "fallback_reason": fallback,
+            "document_hash": self.document_hash,
         }
         if self.delta is not None:
             meta["changed_share"] = round(self.delta.changed_share, 4)
             meta["segments_added"] = self.delta.segments_added
             meta["segments_removed"] = self.delta.segments_removed
+        if self.selection:
+            meta.update(self.selection)
         return meta
 
     def run_stats_meta(self, harness_meta: Mapping[str, Any] | None) -> dict[str, Any]:

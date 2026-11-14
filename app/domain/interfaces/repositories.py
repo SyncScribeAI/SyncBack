@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, TypedDict
 
 from app.domain.analysis_reuse import AnalysisStrategy, Baseline, RunInput
+from app.domain.baseline_result import BaselineFlag, BaselineSuggestion
 from app.domain.interfaces.user_repository import IUserRepository  # noqa: F401
 from app.domain.pipeline_run import PipelineRunSummary
 from app.domain.source_snapshot import (
@@ -273,8 +274,21 @@ class IAnalysisFlagRepository(ABC):
     async def bulk_create(self, flags: Sequence[AnalysisFlag]) -> None: ...
 
     @abstractmethod
-    async def carry_over(self, from_job_id: uuid.UUID, to_job_id: uuid.UUID) -> int:
-        """Скопировать результат прошлой задачи в новую вместе с решениями; число строк."""
+    async def carry_over(
+        self,
+        from_job_id: uuid.UUID,
+        to_job_id: uuid.UUID,
+        only: Sequence[uuid.UUID] | None = None,
+    ) -> int:
+        """Скопировать результат прошлой задачи в новую вместе с решениями; число строк.
+
+        only ограничивает копию выбранными флагами.
+        """
+        ...
+
+    @abstractmethod
+    async def baseline_rows(self, job_id: uuid.UUID) -> list[BaselineFlag]:
+        """Сводка флагов задачи для правил инкрементального переноса."""
         ...
 
     @abstractmethod
@@ -382,8 +396,23 @@ class ISuggestionRepository(ABC):
     async def bulk_create(self, suggestions: list[Suggestion]) -> list[Suggestion]: ...
 
     @abstractmethod
-    async def carry_over(self, from_job_id: uuid.UUID, to_job_id: uuid.UUID) -> int:
-        """Скопировать результат прошлой задачи в новую вместе с решениями и связями с источниками; число строк."""
+    async def carry_over(
+        self,
+        from_job_id: uuid.UUID,
+        to_job_id: uuid.UUID,
+        only: Sequence[uuid.UUID] | None = None,
+        stale: Sequence[uuid.UUID] = (),
+    ) -> int:
+        """Скопировать результат прошлой задачи в новую вместе с решениями и связями с источниками; число строк.
+
+        only ограничивает копию выбранными правками; копии правок из stale помечаются
+        устаревшими.
+        """
+        ...
+
+    @abstractmethod
+    async def baseline_rows(self, job_id: uuid.UUID) -> list[BaselineSuggestion]:
+        """Сводка правок задачи для правил инкрементального переноса."""
         ...
 
     @abstractmethod
@@ -528,6 +557,11 @@ class IAnalysisJobRepository(ABC):
     @abstractmethod
     async def record_reuse(self, job: AnalysisJob, baseline_job_id: uuid.UUID) -> None:
         """Сводка перенесённого результата: счётчики блоков и оснований прошлой задачи."""
+        ...
+
+    @abstractmethod
+    async def record_audit(self, job_id: uuid.UUID, audit: dict[str, Any]) -> None:
+        """Итог контрольного полного анализа в meta уже завершённой задачи."""
         ...
 
     @abstractmethod

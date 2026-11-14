@@ -538,3 +538,71 @@ async def test_unchanged_input_is_carried_over_on_postgres(
         await session.commit()
         kept = await session.get(Suggestion, carried_id)
         assert kept is not None and kept.carried_from_id is None
+
+
+@pytest.mark.usefixtures("worker_env")
+async def test_selective_carry_over_marks_stale_on_postgres(
+    pg_sessionmaker: async_sessionmaker[AsyncSession],
+    scenario: Scenario,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ChangeAndFlagAnalyzer.calls = 0
+    monkeypatch.setattr(v2, "_get_analyzer", ChangeAndFlagAnalyzer)
+    await v2.analyze_document(str(scenario.job_id), scenario.source_ids, 0)
+    async with pg_sessionmaker() as session:
+        first = await session.get(AnalysisJob, scenario.job_id)
+        assert first is not None
+        [kept] = (
+            await session.execute(
+                select(Suggestion).where(Suggestion.analysis_job_id == scenario.job_id)
+            )
+        ).scalars()
+        dropped = Suggestion(
+            analysis_job_id=first.id,
+            document_id=first.document_id,
+            section_ref="",
+            change_type="modify",
+            original_text="Второй абзац",
+            suggested_text="Второй абзац обновлён",
+        )
+        session.add(dropped)
+        second = AnalysisJob(
+            document_id=first.document_id,
+            status=AnalysisJobStatus.DISPATCHED,
+            baseline_job_id=first.id,
+        )
+        session.add(second)
+        await session.commit()
+        kept_id, second_id = kept.id, second.id
+
+    async with pg_sessionmaker() as session:
+        uow = SqlAlchemyUnitOfWork(session)
+        assert (
+            await uow.suggestions.carry_over(
+                scenario.job_id, second_id, only=[kept_id], stale=[kept_id]
+            )
+            == 1
+        )
+        assert await uow.flags.carry_over(scenario.job_id, second_id, only=[]) == 0
+        await session.commit()
+
+    async with pg_sessionmaker() as session:
+        [carried] = (
+            await session.execute(select(Suggestion).where(Suggestion.analysis_job_id == second_id))
+        ).scalars()
+        assert (carried.carried_from_id, carried.stale) == (kept_id, True)
+        assert [source.id for source in carried.sources] == [uuid.UUID(scenario.source_ids[0])]
+        flags = await session.execute(
+            select(func.count())
+            .select_from(AnalysisFlag)
+            .where(AnalysisFlag.analysis_job_id == second_id)
+        )
+        assert flags.scalar_one() == 0
+        await session.execute(
+            AnalysisJob.__table__.delete().where(AnalysisJob.id == scenario.job_id)
+        )
+        await session.commit()
+        job = await session.get(AnalysisJob, second_id)
+        assert job is not None
+        await session.refresh(job)
+        assert job.baseline_job_id is None

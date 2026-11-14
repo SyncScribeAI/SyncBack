@@ -11,12 +11,13 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, select, update
+from sqlalchemy import CursorResult, Table, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.repositories import IAnalysisFlagRepository
 from app.domain.value_objects import FlagStatusVO
 from app.infrastructure.db.models.analysis_flag import AnalysisFlag
+from app.infrastructure.db.repositories.carry_over import copy_job_rows
 
 
 class AnalysisFlagRepository(IAnalysisFlagRepository):
@@ -28,6 +29,11 @@ class AnalysisFlagRepository(IAnalysisFlagRepository):
             return
         self._session.add_all(flags)
         await self._session.flush()
+
+    async def carry_over(self, from_job_id: uuid.UUID, to_job_id: uuid.UUID) -> int:
+        return await copy_job_rows(
+            self._session, cast(Table, AnalysisFlag.__table__), from_job_id, to_job_id
+        )
 
     async def get_by_id(self, flag_id: uuid.UUID) -> AnalysisFlag | None:
         return await self._session.get(AnalysisFlag, flag_id)

@@ -208,11 +208,18 @@ class SnapshotDraft:
 
     @classmethod
     def of(cls, project_id: uuid.UUID, text: str) -> SnapshotDraft:
+        return cls.from_segments(project_id, text, segment_fingerprints(text))
+
+    @classmethod
+    def from_segments(
+        cls, project_id: uuid.UUID, text: str, segments: Sequence[tuple[SourceSegment, int]]
+    ) -> SnapshotDraft:
+        """Снимок из уже посчитанных сегментов: differ использует их же, без второго прохода."""
         return cls(
             project_id=project_id,
             content_hash=content_hash(text),
             text=text,
-            fingerprints=tuple(fp for _, fp in segment_fingerprints(text)),
+            fingerprints=tuple(fp for _, fp in segments),
         )
 
     @property

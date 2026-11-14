@@ -458,3 +458,83 @@ async def test_flags_on_postgres(
         )
         await session.commit()
         assert await session.get(AnalysisFlag, flag_id) is None
+
+
+class ChangeAndFlagAnalyzer:
+    """Правка с цитатой и флаг: перенос копирует обе таблицы и связи с источником."""
+
+    calls = 0
+
+    async def analyze(self, request: AnalysisRequest) -> AnalysisResult:
+        type(self).calls += 1
+        first, second = request.document.blocks[0], request.document.blocks[1]
+        return AnalysisResult(
+            status=AnalysisStatus.COMPLETED,
+            suggestions=(
+                ProposedChange("modify", first.ref, "Первый абзац", "Первый абзац обновлён"),
+            ),
+            flags=(ReviewFlag("sources_conflict", second.ref, ""),),
+            meta={"checked_blocks": 2, "errors": 0},
+        )
+
+    async def health_check(self) -> bool:
+        return True
+
+
+@pytest.mark.usefixtures("worker_env")
+async def test_unchanged_input_is_carried_over_on_postgres(
+    pg_sessionmaker: async_sessionmaker[AsyncSession],
+    scenario: Scenario,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ChangeAndFlagAnalyzer.calls = 0
+    monkeypatch.setattr(v2, "_get_analyzer", ChangeAndFlagAnalyzer)
+    monkeypatch.setattr(
+        v2, "_settings", v2._settings.model_copy(update={"analysis_incremental_mode": "delta"})
+    )
+    await v2.analyze_document(str(scenario.job_id), scenario.source_ids, 0)
+    async with pg_sessionmaker() as session:
+        first = await session.get(AnalysisJob, scenario.job_id)
+        assert first is not None and first.input_hash is not None
+        [original] = (
+            await session.execute(
+                select(Suggestion).where(Suggestion.analysis_job_id == scenario.job_id)
+            )
+        ).scalars()
+        await session.execute(
+            update(Suggestion).where(Suggestion.id == original.id).values(status="accepted")
+        )
+        second = AnalysisJob(document_id=first.document_id, status=AnalysisJobStatus.DISPATCHED)
+        session.add(second)
+        await session.commit()
+        second_id, original_id = second.id, original.id
+
+    await v2.analyze_document(str(second_id), scenario.source_ids, 0)
+
+    assert ChangeAndFlagAnalyzer.calls == 1
+    async with pg_sessionmaker() as session:
+        job = await session.get(AnalysisJob, second_id)
+        assert job is not None and job.pipeline_meta is not None
+        assert job.pipeline_meta["incremental"]["mode"] == "reused"
+        assert job.input_hash == first.input_hash
+        [carried] = (
+            await session.execute(select(Suggestion).where(Suggestion.analysis_job_id == second_id))
+        ).scalars()
+        assert (carried.carried_from_id, carried.status.value) == (original_id, "accepted")
+        assert [source.id for source in carried.sources] == [uuid.UUID(scenario.source_ids[0])]
+        [flag] = (
+            await session.execute(
+                select(AnalysisFlag).where(AnalysisFlag.analysis_job_id == second_id)
+            )
+        ).scalars()
+        assert flag.carried_from_id is not None
+        carried_id = carried.id
+
+    # Удаление прошлой задачи не трогает перенесённые строки: ссылка обнуляется.
+    async with pg_sessionmaker() as session:
+        await session.execute(
+            AnalysisJob.__table__.delete().where(AnalysisJob.id == scenario.job_id)
+        )
+        await session.commit()
+        kept = await session.get(Suggestion, carried_id)
+        assert kept is not None and kept.carried_from_id is None

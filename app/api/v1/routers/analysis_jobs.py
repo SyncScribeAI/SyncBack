@@ -22,6 +22,7 @@ from app.api.schemas.analysis_job import (
     AnalysisJobResponse,
 )
 from app.core.dependencies import get_analysis_job_service
+from app.domain.analysis_reuse import AnalysisStrategy
 from app.domain.exceptions import (
     AnalysisAlreadyRunningError,
     AnalysisConfirmationRequiredError,
@@ -87,7 +88,11 @@ async def start_analysis_job(
 
     try:
         job = await service.create_job(
-            project.id, document_id, idempotency_key=idempotency_key, force=body.force
+            project.id,
+            document_id,
+            idempotency_key=idempotency_key,
+            force=body.force,
+            strategy=AnalysisStrategy(body.strategy),
         )
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

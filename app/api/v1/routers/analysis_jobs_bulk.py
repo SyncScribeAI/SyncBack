@@ -14,6 +14,7 @@ from app.api.schemas.analysis_job import (
     BulkJobResult,
 )
 from app.core.dependencies import get_analysis_job_service
+from app.domain.analysis_reuse import AnalysisStrategy
 from app.domain.services.analysis_job_service import AnalysisJobService, BulkSkipReason
 from app.infrastructure.db.models.project import Project
 
@@ -44,7 +45,10 @@ async def bulk_start_analysis_jobs(
     с кодом QUEUE_UNAVAILABLE. Ответ 201, если запущена хотя бы одна задача, иначе 200.
     """
     outcomes = await service.bulk_create_jobs_for_project(
-        project.id, document_ids=payload.document_ids, force=payload.force
+        project.id,
+        document_ids=payload.document_ids,
+        force=payload.force,
+        strategy=AnalysisStrategy(payload.strategy),
     )
 
     results = [

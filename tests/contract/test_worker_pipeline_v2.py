@@ -589,7 +589,21 @@ async def test_suggestions_are_bound_to_blocks_and_keep_pipeline_order(
             "evidence_not_found": 0,
             "evidence_unparsed": 0,
         },
+        "incremental": {"mode": "full", "reason": "no_baseline", "baseline_job_id": None},
+        # Один источник «Решения: срок ответа 5 рабочих дней (A)»: один сегмент, 39 символов.
+        "run_stats": {
+            "segments_total": 1,
+            "segments_sent": 1,
+            "chars_total": 39,
+            "chars_sent": 39,
+            # Заголовки уходят как контекст и не проверяются.
+            "blocks_total": 4,
+            "blocks_checked": 2,
+            "harness": {"llm_seconds": 1.5},
+        },
     }
+    assert job.json()["incremental"]["reason"] == "no_baseline"
+    assert job.json()["run_stats"]["harness"] == {"llm_seconds": 1.5}
 
 
 async def test_failed_pipeline_answer_keeps_request_id(

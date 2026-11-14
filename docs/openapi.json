@@ -1833,7 +1833,8 @@
               "schema": {
                 "$ref": "#/components/schemas/AnalysisJobCreateRequest",
                 "default": {
-                  "force": false
+                  "force": false,
+                  "strategy": "auto"
                 }
               }
             }
@@ -2055,7 +2056,8 @@
               "schema": {
                 "$ref": "#/components/schemas/BulkAnalysisRequest",
                 "default": {
-                  "force": false
+                  "force": false,
+                  "strategy": "auto"
                 }
               }
             }
@@ -3294,6 +3296,76 @@
         "title": "AnalysisHealthResponse",
         "description": "Готовность анализа: конвейер и воркеры очереди. Только для администратора."
       },
+      "AnalysisIncrementalInfo": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "reused",
+              "full"
+            ],
+            "title": "Mode"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "description": "reused, mode_off, strategy_full, sources_failed, no_baseline или input_changed"
+          },
+          "baseline_job_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline Job Id"
+          },
+          "changed_share": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Changed Share",
+            "description": "Доля символов источников в новых сегментах"
+          },
+          "segments_added": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Segments Added"
+          },
+          "segments_removed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Segments Removed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "mode",
+          "reason"
+        ],
+        "title": "AnalysisIncrementalInfo",
+        "description": "Как задача получила результат: вызовом ML или переносом из прошлой задачи."
+      },
       "AnalysisJobConflictResponse": {
         "properties": {
           "detail": {
@@ -3319,6 +3391,16 @@
             "type": "boolean",
             "title": "Force",
             "default": false
+          },
+          "strategy": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "full"
+            ],
+            "title": "Strategy",
+            "description": "auto переносит результат прошлой полной задачи, если вход анализа не изменился; full всегда вызывает ML-конвейер",
+            "default": "auto"
           }
         },
         "type": "object",
@@ -3423,6 +3505,35 @@
             ],
             "title": "Failed Blocks",
             "description": "Сколько блоков конвейер не смог проверить; None — неизвестно"
+          },
+          "strategy": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "full"
+            ],
+            "title": "Strategy",
+            "default": "auto"
+          },
+          "incremental": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AnalysisIncrementalInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "run_stats": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AnalysisRunStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -3478,6 +3589,59 @@
           "consumers"
         ],
         "title": "AnalysisQueueHealth"
+      },
+      "AnalysisRunStats": {
+        "properties": {
+          "segments_total": {
+            "type": "integer",
+            "title": "Segments Total"
+          },
+          "segments_sent": {
+            "type": "integer",
+            "title": "Segments Sent"
+          },
+          "chars_total": {
+            "type": "integer",
+            "title": "Chars Total"
+          },
+          "chars_sent": {
+            "type": "integer",
+            "title": "Chars Sent"
+          },
+          "blocks_total": {
+            "type": "integer",
+            "title": "Blocks Total"
+          },
+          "blocks_checked": {
+            "type": "integer",
+            "title": "Blocks Checked"
+          },
+          "harness": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Harness"
+          }
+        },
+        "type": "object",
+        "required": [
+          "segments_total",
+          "segments_sent",
+          "chars_total",
+          "chars_sent",
+          "blocks_total",
+          "blocks_checked"
+        ],
+        "title": "AnalysisRunStats",
+        "description": "Объём входа и отправленного в ML; в harness счётчики вызовов модели, если они есть."
       },
       "AnalysisStateResponse": {
         "properties": {
@@ -3746,6 +3910,16 @@
             "type": "boolean",
             "title": "Force",
             "default": false
+          },
+          "strategy": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "full"
+            ],
+            "title": "Strategy",
+            "description": "auto переносит результат прошлой полной задачи, если вход анализа не изменился; full всегда вызывает ML-конвейер",
+            "default": "auto"
           }
         },
         "type": "object",

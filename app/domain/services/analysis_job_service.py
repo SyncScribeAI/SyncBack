@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, NoReturn
 
+from app.domain.analysis_reuse import AnalysisStrategy
 from app.domain.exceptions import (
     AnalysisAlreadyRunningError,
     AnalysisConfirmationRequiredError,
@@ -111,6 +112,7 @@ class AnalysisJobService:
         idempotency_key: str | None = None,
         *,
         force: bool = False,
+        strategy: AnalysisStrategy = AnalysisStrategy.AUTO,
     ) -> AnalysisJob:
         """Создать задачу анализа и перевести документ в draft до постановки в очередь.
 
@@ -128,7 +130,7 @@ class AnalysisJobService:
         """
         try:
             job, created = await self._create_job_once(
-                project_id, document_id, idempotency_key, force=force
+                project_id, document_id, idempotency_key, force=force, strategy=strategy
             )
         except AnalysisJobConflictError as exc:
             # Транзакция уже откачена; событие о переводе документа в draft
@@ -146,6 +148,7 @@ class AnalysisJobService:
         idempotency_key: str | None,
         *,
         force: bool,
+        strategy: AnalysisStrategy,
     ) -> tuple[AnalysisJob, bool]:
         """Вернуть (задача, создана_ли_сейчас)."""
         async with self._uow:
@@ -188,6 +191,7 @@ class AnalysisJobService:
                 document,
                 status=AnalysisJobStatusVO.PENDING,
                 idempotency_key=idempotency_key,
+                strategy=strategy,
             )
             await self._uow.documents.set_current_job(document, job.id)
             await self._commit()
@@ -347,6 +351,7 @@ class AnalysisJobService:
         document_ids: list[uuid.UUID] | None = None,
         *,
         force: bool = False,
+        strategy: AnalysisStrategy = AnalysisStrategy.AUTO,
     ) -> list[BulkJobOutcome]:
         """Создать и поставить в очередь задачи для документов проекта, вернуть итог по каждому.
 
@@ -367,7 +372,7 @@ class AnalysisJobService:
         outcomes: list[BulkJobOutcome] = []
         for document_id in target_ids:
             try:
-                job = await self.create_job(project_id, document_id, force=force)
+                job = await self.create_job(project_id, document_id, force=force, strategy=strategy)
             except DocumentNotFoundError as exc:
                 outcomes.append(_skipped(document_id, BulkSkipReason.NOT_FOUND, exc))
             except AnalysisConfirmationRequiredError as exc:

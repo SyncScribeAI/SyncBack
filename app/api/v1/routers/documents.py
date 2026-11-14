@@ -29,6 +29,7 @@ from app.core.dependencies import (
     get_source_service,
 )
 from app.domain.exceptions import (
+    DocumentExportIntegrityError,
     DocumentNotFoundError,
     DocumentParseError,
     FileTooLargeError,
@@ -321,6 +322,10 @@ async def export_document(
         )
     except UnsupportedExportFormatError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except DocumentExportIntegrityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
     except InvalidDocumentStatusError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     await _log_download(audit_log_service, current_user.id, document.id)

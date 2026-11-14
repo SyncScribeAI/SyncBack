@@ -752,6 +752,13 @@ CREATE UNIQUE INDEX uq_analysis_jobs_one_active_per_document ON public.analysis_
 
 
 --
+-- Name: ix_analysis_jobs_unqueued; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_analysis_jobs_unqueued ON public.analysis_jobs USING btree (created_at) WHERE ((celery_task_id IS NULL) AND (status = ANY (ARRAY['pending'::public.analysis_job_status, 'dispatched'::public.analysis_job_status])));
+
+
+--
 -- Name: uq_document_blocks_doc_position; Type: INDEX; Schema: public; Owner: -
 --
 

@@ -17,6 +17,7 @@ from app.domain.exceptions import (
 from app.domain.interfaces.source_connector import SourceKind, SourceRef
 from app.domain.source_url import IpAddress, SourceUrlPolicy
 from app.infrastructure.source_connectors.url_connector import (
+    _ROBOTS_MAX_BYTES,
     UrlConnector,
     load_auth_headers,
     resolve_host,
@@ -392,8 +393,24 @@ def test_auth_headers_file_is_read_by_host(tmp_path) -> None:
     path = tmp_path / "auth.json"
     path.write_text('{"Wiki.Corp.": {"Authorization": "Bearer t"}}', encoding="utf-8")
 
-    assert load_auth_headers(str(path)) == {"wiki.corp": {"Authorization": "Bearer t"}}
+    assert load_auth_headers(str(path)) == {"https://wiki.corp:443": {"Authorization": "Bearer t"}}
     assert load_auth_headers("") == {}
+
+
+def test_auth_headers_file_keeps_explicit_https_port(tmp_path) -> None:
+    path = tmp_path / "auth.json"
+    path.write_text('{"https://wiki.corp:8443": {"Authorization": "Bearer t"}}', encoding="utf-8")
+
+    assert list(load_auth_headers(str(path))) == ["https://wiki.corp:8443"]
+
+
+@pytest.mark.parametrize("key", ["http://wiki.corp", "https://wiki.corp/path", "ftp://wiki.corp"])
+def test_auth_headers_file_rejects_non_https_origin(tmp_path, key: str) -> None:
+    path = tmp_path / "auth.json"
+    path.write_text(f'{{"{key}": {{"Authorization": "Bearer t"}}}}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="origin"):
+        load_auth_headers(str(path))
 
 
 def test_auth_headers_file_rejects_wrong_shape(tmp_path) -> None:
@@ -402,3 +419,135 @@ def test_auth_headers_file_rejects_wrong_shape(tmp_path) -> None:
 
     with pytest.raises(ValueError):
         load_auth_headers(str(path))
+
+
+def _auth_probe(seen: list[tuple[str, str | None]]):
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((str(request.url), request.headers.get("authorization")))
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        return httpx.Response(200, text="ok", headers={"content-type": "text/plain"})
+
+    return handler
+
+
+@pytest.mark.parametrize(
+    "url", ["http://wiki.corp/page", "https://wiki.corp:8443/page", "http://wiki.corp:443/page"]
+)
+async def test_auth_header_skips_other_scheme_or_port(url: str) -> None:
+    """Случай из ревью: заголовок для wiki.corp уходил на http://wiki.corp:8080."""
+    seen: list[tuple[str, str | None]] = []
+    connector = _connector(
+        _auth_probe(seen),
+        {"wiki.corp": [PORTAL_IP]},
+        policy=INTERNAL,
+        auth_headers={"wiki.corp": {"Authorization": "Bearer token"}},
+    )
+
+    assert await connector.fetch(_ref(url)) == "ok"
+    assert seen and all(auth is None for _, auth in seen)
+
+
+async def test_auth_header_with_explicit_port_goes_only_to_that_port() -> None:
+    seen: list[tuple[str, str | None]] = []
+    connector = _connector(
+        _auth_probe(seen),
+        {"wiki.corp": [PORTAL_IP]},
+        policy=INTERNAL,
+        auth_headers={"https://wiki.corp:8443": {"Authorization": "Bearer token"}},
+    )
+
+    assert await connector.fetch(_ref("https://wiki.corp:8443/page")) == "ok"
+    assert seen[-1][1] == "Bearer token"
+    seen.clear()
+    assert await connector.fetch(_ref("https://wiki.corp/page")) == "ok"
+    assert all(auth is None for _, auth in seen)
+
+
+async def test_redirect_to_http_on_same_host_drops_auth_header() -> None:
+    seen: list[tuple[str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.scheme, request.headers.get("authorization")))
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        if request.url.scheme == "https":
+            return httpx.Response(302, headers={"location": "http://wiki.corp/page"})
+        return httpx.Response(200, text="ok", headers={"content-type": "text/plain"})
+
+    connector = _connector(
+        handler,
+        {"wiki.corp": [PORTAL_IP]},
+        policy=INTERNAL,
+        auth_headers={"wiki.corp": {"Authorization": "Bearer token"}},
+    )
+
+    assert await connector.fetch(_ref("https://wiki.corp/page")) == "ok"
+    assert ("https", "Bearer token") in seen
+    assert all(auth is None for scheme, auth in seen if scheme == "http")
+
+
+class _CountingStream(httpx.AsyncByteStream):
+    """Бесконечный поток: считает, сколько байт у него реально забрали."""
+
+    def __init__(self, line: bytes) -> None:
+        self.line = line
+        self.sent = 0
+
+    async def __aiter__(self):
+        while self.sent < 64 * 1024 * 1024:
+            self.sent += len(self.line)
+            yield self.line
+
+
+async def test_robots_read_stops_at_limit() -> None:
+    """Случай из ревью: robots.txt на 8 МиБ читался целиком при лимите 512 КиБ."""
+    stream = _CountingStream(b"# " + b"x" * 8190 + b"\n")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, stream=stream)
+        return httpx.Response(200, text="ok", headers={"content-type": "text/plain"})
+
+    connector = _connector(handler, {"example.com": [PUBLIC_IP]})
+
+    assert await connector.fetch(_ref("https://example.com/doc")) == "ok"
+    assert stream.sent <= _ROBOTS_MAX_BYTES + 8192
+
+
+class _ChunkedBody(httpx.AsyncByteStream):
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    async def __aiter__(self):
+        for start in range(0, len(self.body), 65536):
+            yield self.body[start : start + 65536]
+
+
+@pytest.mark.parametrize("declared", [True, False])
+async def test_robots_rules_from_head_of_oversized_file_are_enforced(declared: bool) -> None:
+    """Большой файл обрезается до лимита, правила из начала действуют в режиме enforce."""
+    body = b"User-agent: *\nDisallow: /\n" + b"#" * (2 * _ROBOTS_MAX_BYTES)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            if declared:
+                return httpx.Response(200, content=body)
+            return httpx.Response(200, stream=_ChunkedBody(body))
+        raise AssertionError("страница не должна загружаться")
+
+    connector = _connector(handler, {"example.com": [PUBLIC_IP]}, robots="enforce")
+
+    with pytest.raises(SourceFetchError, match="robots"):
+        await connector.fetch(_ref("https://example.com/doc"))
+
+
+async def test_robots_disallow_in_log_mode_still_fetches() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow: /")
+        return httpx.Response(200, text="ok", headers={"content-type": "text/plain"})
+
+    connector = _connector(handler, {"example.com": [PUBLIC_IP]}, robots="log")
+
+    assert await connector.fetch(_ref("https://example.com/doc")) == "ok"

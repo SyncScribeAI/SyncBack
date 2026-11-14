@@ -23,6 +23,7 @@ from app.domain.exceptions import (
 from app.domain.interfaces.document_layout import DocumentLayoutReader
 from app.domain.interfaces.document_parser import IDocumentParserRegistry, ParsedDocument
 from app.domain.interfaces.file_storage import FileStorage, UploadContent
+from app.domain.interfaces.parse_pool import UNBOUNDED_PARSE_POOL, ParsePool
 from app.domain.interfaces.repositories import DocumentRow
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.interfaces.upload_file_inspector import UploadFileInspector, UploadFileReport
@@ -79,7 +80,9 @@ class DocumentService:
         download_url_ttl_seconds: int,
         file_inspector: UploadFileInspector | None = None,
         layout_reader: DocumentLayoutReader | None = None,
+        parse_pool: ParsePool = UNBOUNDED_PARSE_POOL,
     ):
+        self._parse_pool = parse_pool
         self._uow = uow
         self._storage = file_storage
         self._parser_registry = parser_registry
@@ -247,8 +250,9 @@ class DocumentService:
           2. delete(document) — удаляем саму запись документа;
              FK-каскад по document_sources срабатывает здесь.
           3. commit() — единственный коммит на операцию.
-        После коммита — best-effort удаление всех файлов документа
-        (storage_key, original_storage_key, exported_storage_key).
+        После коммита best-effort удаление всех файлов документа
+        (storage_key, original_storage_key, exported_storage_key) и файлов
+        его собственных источников.
 
         Используется когда ORM-объект уже загружен.
         Для удаления только по ID без предварительного SELECT — см. delete_document_by_id.
@@ -261,7 +265,7 @@ class DocumentService:
         )
 
         async with self._uow:
-            await self._uow.documents.delete_document_scoped_sources(document_id)
+            keys_to_delete += await self._uow.documents.delete_document_scoped_sources(document_id)
             await self._uow.documents.delete(document)
             keys_to_delete += await self._unreferenced_snapshot_keys(document.project_id)
             await self._uow.commit()
@@ -285,8 +289,9 @@ class DocumentService:
           2. delete_by_id — DELETE FROM documents RETURNING ключи файлов.
              FK-каскад по document_sources срабатывает здесь.
           3. commit() — единственный коммит на операцию.
-        После коммита — best-effort удаление файлов из хранилища
-        (storage_key, original_storage_key, exported_storage_key).
+        После коммита best-effort удаление файлов из хранилища
+        (storage_key, original_storage_key, exported_storage_key) и файлов
+        собственных источников документа.
 
         DocumentNotFoundError — документа нет в проекте;
         InvalidDocumentStatusError — документ сейчас анализируется.
@@ -301,7 +306,7 @@ class DocumentService:
                 raise InvalidDocumentStatusError(
                     "Нельзя удалить документ, пока идёт анализ. Сначала отмените задачу."
                 )
-            await self._uow.documents.delete_document_scoped_sources(document_id)
+            source_keys = await self._uow.documents.delete_document_scoped_sources(document_id)
             deleted = await self._uow.documents.delete_by_id(
                 document_id=document_id,
                 project_id=project_id,
@@ -315,6 +320,7 @@ class DocumentService:
                 deleted.get("original_storage_key"),
                 deleted.get("exported_storage_key"),
             )
+            keys_to_delete += source_keys
             keys_to_delete += await self._unreferenced_snapshot_keys(project_id)
             await self._uow.commit()
 
@@ -375,5 +381,8 @@ class DocumentService:
     async def _read_layout(self, storage_key: str) -> DocumentLayout:
         raw_bytes = await self._storage.download(storage_key)
         if self._layout_reader is None:
-            return DocumentLayout(self._parser_registry.parse_by_filename(storage_key, raw_bytes))
+            parsed = await self._parse_pool.run(
+                self._parser_registry.parse_by_filename, storage_key, raw_bytes
+            )
+            return DocumentLayout(parsed)
         return await self._layout_reader.read(storage_key, raw_bytes)

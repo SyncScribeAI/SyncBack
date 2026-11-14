@@ -177,12 +177,22 @@ class Settings(BaseSettings):
     # Больше страниц PDF не разбирается: разбор держит общий замок PDFium, и один огромный
     # файл задержал бы все остальные.
     pdf_max_pages: int = Field(default=500, gt=0)
+    # Столько файлов процесс разбирает одновременно. Остальные запросы ждут свободный поток,
+    # а не занимают CPU и память все сразу; PDF всё равно идут по одному из-за замка PDFium.
+    parse_pool_workers: int = Field(default=2, ge=1, le=32)
     # Автор аннотаций экспорта PDF (/T): просмотрщик показывает его в заметке правки.
     pdf_annotation_author: str = Field(default="SyncScribe", min_length=1, max_length=100)
     # Очередь Celery задачи анализа v2: её слушает отдельный воркер с числом процессов, равным
     # числу одновременных прогонов, которое выдерживает ML-конвейер. «celery» вернёт задачу в
     # общую очередь — для разработки с одним воркером.
     analysis_v2_queue: str = Field(default="analysis_v2", pattern=r"^[A-Za-z0-9_.-]{1,64}$")
+    # Задача без идентификатора в очереди старше ANALYSIS_DISPATCH_STALE_SECONDS считается
+    # потерянной между записью статуса и отправкой в брокер: сверка отправляет её заново.
+    # Порог выше обычной задержки отправки, иначе сверка продублирует живой запуск.
+    # Интервал 0 отключает сверку.
+    analysis_dispatch_stale_seconds: int = Field(default=300, ge=60)
+    analysis_dispatch_reconcile_interval_seconds: int = Field(default=60, ge=0)
+    analysis_dispatch_reconcile_batch: int = Field(default=50, gt=0, le=1000)
     suggestion_low_confidence_threshold: float = Field(default=0.7, ge=0, le=1)
     # Догоняющие правки для точных повторов фразы. Поиск — O(G·T) по тексту документа,
     # поэтому число групп и правок на группу ограничено сверху.

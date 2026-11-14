@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.domain.value_objects import DocumentStatusVO
 from app.infrastructure.db.models.audit_log import AuditLog
 from tests.contract.conftest import (
+    InMemoryFileStorage,
     create_project,
     register_and_login,
     set_document_status,
@@ -243,6 +244,37 @@ async def test_delete_document(client: AsyncClient) -> None:
     assert (await client.delete(url, headers=headers)).status_code == 204
     assert (await client.get(url, headers=headers)).status_code == 404
     assert (await client.delete(url, headers=headers)).status_code == 404
+
+
+async def test_delete_document_removes_files_of_its_own_sources(
+    client: AsyncClient, file_storage: InMemoryFileStorage
+) -> None:
+    """Файл источника scope=document уходит вместе с документом, проектный остаётся."""
+    headers = await register_and_login(client)
+    project_id = await create_project(client, headers)
+    document = await upload_document(client, headers, project_id)
+    base = f"/api/v1/projects/{project_id}/sources/file"
+    own = await client.post(
+        base,
+        data={"name": "Свой", "scope": "document", "document_id": document["id"]},
+        files={"file": ("own.txt", b"own", "text/plain")},
+        headers=headers,
+    )
+    shared = await client.post(
+        base,
+        data={"name": "Общий", "scope": "project"},
+        files={"file": ("shared.txt", b"shared", "text/plain")},
+        headers=headers,
+    )
+    assert own.status_code == shared.status_code == 201
+    files_before = {key for key, data in file_storage.files.items() if data in (b"own", b"shared")}
+    assert len(files_before) == 2
+
+    url = f"/api/v1/projects/{project_id}/documents/{document['id']}"
+    assert (await client.delete(url, headers=headers)).status_code == 204
+
+    assert b"own" not in file_storage.files.values()
+    assert b"shared" in file_storage.files.values()
 
 
 async def test_global_upload_requires_own_project(client: AsyncClient) -> None:

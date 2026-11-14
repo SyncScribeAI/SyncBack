@@ -37,7 +37,11 @@ class AppliedChange:
 
 
 class DocumentExporter(Protocol):
-    def apply_changes(self, raw_bytes: bytes, changes: list[AppliedChange]) -> bytes: ...
+    def apply_changes(self, raw_bytes: bytes, changes: list[AppliedChange]) -> bytes:
+        """Файл с правками. Правка без места в файле пропускается: исходный текст на её
+        месте остаётся верным. DocumentExportIntegrityError, если собранный файл
+        искажает текст."""
+        ...
 
 
 class DocumentExporterRegistry(Protocol):

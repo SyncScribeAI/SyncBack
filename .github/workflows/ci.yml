@@ -48,10 +48,7 @@ jobs:
       - name: Layer imports
         run: python scripts/check_layer_imports.py app
 
-      # Пока не блокирует merge: остались ошибки из-за ORM-типов в портах домена
-      # (suggestion_service.py); шаг станет обязательным, когда порты перейдут на протоколы.
       - name: Mypy type check
-        continue-on-error: true
         run: mypy app/ --ignore-missing-imports
 
       - name: Run unit tests with coverage

@@ -6,7 +6,8 @@ from datetime import UTC, datetime
 from sqlalchemy import ColumnElement, and_, delete, func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.interfaces.repositories import DocumentRow, IDocumentRepository
+from app.domain.interfaces.entities import DocumentProtocol
+from app.domain.interfaces.repositories import DocumentRow, DocumentT, IDocumentRepository
 from app.domain.value_objects import (
     DocumentFormatVO,
     DocumentStatusVO,
@@ -244,9 +245,9 @@ class DocumentRepository(IDocumentRepository):
 
     async def update_status(
         self,
-        document: Document,
+        document: DocumentT,
         status: DocumentStatusVO,
-    ) -> Document:
+    ) -> DocumentT:
         document.status = _status_to_orm(status)
         await self._session.flush()
         return document
@@ -279,7 +280,7 @@ class DocumentRepository(IDocumentRepository):
 
     async def update_exported_key(
         self,
-        document: Document,
+        document: DocumentProtocol,
         export_key: str,
     ) -> None:
         document.exported_storage_key = export_key

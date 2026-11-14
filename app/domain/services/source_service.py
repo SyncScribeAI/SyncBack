@@ -36,6 +36,7 @@ from app.domain.exceptions import (
 )
 from app.domain.interfaces.document_parser import IDocumentParserRegistry
 from app.domain.interfaces.file_storage import FileStorage, UploadContent
+from app.domain.interfaces.parse_pool import UNBOUNDED_PARSE_POOL, ParsePool
 from app.domain.interfaces.source_connector import SourceConnectorResolver, SourceKind, SourceRef
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.interfaces.upload_file_inspector import UploadFileInspector, UploadFileReport
@@ -76,7 +77,9 @@ class SourceService:
         connector_for: SourceConnectorResolver | None = None,
         max_source_chars: int | None = None,
         file_inspector: UploadFileInspector | None = None,
+        parse_pool: ParsePool = UNBOUNDED_PARSE_POOL,
     ) -> None:
+        self._parse_pool = parse_pool
         self._uow = uow
         self._storage = file_storage
         self._upload_limits = upload_limits
@@ -338,7 +341,9 @@ class SourceService:
         if self._parser_registry is None:
             raise UnsupportedFormatError("Просмотр источников не настроен")
         raw_bytes = await self._storage.download(source.storage_key)
-        return self._parser_registry.extract_text(source.storage_key, raw_bytes)
+        return await self._parse_pool.run(
+            self._parser_registry.extract_text, source.storage_key, raw_bytes
+        )
 
     # ------------------------------------------------------------------
     # Проверка

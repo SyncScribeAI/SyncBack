@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from app.domain.document_geometry import DocumentLayout, PageRect
 from app.domain.interfaces.document_parser import IDocumentParserRegistry
 from app.domain.interfaces.file_storage import FileStorage, UploadContent
+from app.domain.interfaces.parse_pool import UNBOUNDED_PARSE_POOL, ParsePool
 from app.domain.storage_keys import document_layout_key
 from app.infrastructure.layout.codec import (
     LayoutCacheMismatch,
@@ -30,14 +31,21 @@ class CachedDocumentLayoutReader:
     попробует снова.
     """
 
-    def __init__(self, registry: IDocumentParserRegistry, storage: FileStorage) -> None:
+    def __init__(
+        self,
+        registry: IDocumentParserRegistry,
+        storage: FileStorage,
+        parse_pool: ParsePool = UNBOUNDED_PARSE_POOL,
+    ) -> None:
         self._registry = registry
         self._storage = storage
+        self._pool = parse_pool
 
     async def read(self, storage_key: str, raw_bytes: bytes) -> DocumentLayout:
         geometry = self._registry.geometry_for(storage_key)
         if geometry is None:
-            return DocumentLayout(self._registry.parse_by_filename(storage_key, raw_bytes))
+            parsed = await self._pool.run(self._registry.parse_by_filename, storage_key, raw_bytes)
+            return DocumentLayout(parsed)
 
         stamp = LayoutStamp(geometry.version, hashlib.sha256(raw_bytes).hexdigest())
         cache_key = document_layout_key(storage_key)
@@ -45,7 +53,7 @@ class CachedDocumentLayoutReader:
         if cached is not None:
             return cached
 
-        layout = await asyncio.to_thread(geometry.parse_layout, raw_bytes)
+        layout = await self._pool.run(geometry.parse_layout, raw_bytes)
         await self._save(cache_key, layout, stamp)
         return layout
 
@@ -59,7 +67,7 @@ class CachedDocumentLayoutReader:
         geometry = self._registry.geometry_for(storage_key)
         if geometry is None or layout.runs is None:
             return None
-        return await asyncio.to_thread(geometry.locate, raw_bytes, layout.runs, spans)
+        return await self._pool.run(geometry.locate, raw_bytes, layout.runs, spans)
 
     async def _load(self, cache_key: str, stamp: LayoutStamp) -> DocumentLayout | None:
         try:

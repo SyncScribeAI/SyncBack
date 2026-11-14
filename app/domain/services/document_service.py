@@ -23,6 +23,7 @@ from app.domain.exceptions import (
 from app.domain.interfaces.document_layout import DocumentLayoutReader
 from app.domain.interfaces.document_parser import IDocumentParserRegistry, ParsedDocument
 from app.domain.interfaces.file_storage import FileStorage, UploadContent
+from app.domain.interfaces.parse_pool import UNBOUNDED_PARSE_POOL, ParsePool
 from app.domain.interfaces.repositories import DocumentRow
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.interfaces.upload_file_inspector import UploadFileInspector, UploadFileReport
@@ -79,7 +80,9 @@ class DocumentService:
         download_url_ttl_seconds: int,
         file_inspector: UploadFileInspector | None = None,
         layout_reader: DocumentLayoutReader | None = None,
+        parse_pool: ParsePool = UNBOUNDED_PARSE_POOL,
     ):
+        self._parse_pool = parse_pool
         self._uow = uow
         self._storage = file_storage
         self._parser_registry = parser_registry
@@ -378,5 +381,8 @@ class DocumentService:
     async def _read_layout(self, storage_key: str) -> DocumentLayout:
         raw_bytes = await self._storage.download(storage_key)
         if self._layout_reader is None:
-            return DocumentLayout(self._parser_registry.parse_by_filename(storage_key, raw_bytes))
+            parsed = await self._parse_pool.run(
+                self._parser_registry.parse_by_filename, storage_key, raw_bytes
+            )
+            return DocumentLayout(parsed)
         return await self._layout_reader.read(storage_key, raw_bytes)

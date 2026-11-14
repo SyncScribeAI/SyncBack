@@ -15,6 +15,7 @@ from app.domain.interfaces.source_connector import SourceConnector, SourceKind, 
 from app.infrastructure.db.models.source import Source
 from app.infrastructure.events.publishers import RedisEventPublisher
 from app.infrastructure.layout.cached_reader import CachedDocumentLayoutReader
+from app.infrastructure.parsers.parse_pool import get_parse_pool
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 from app.infrastructure.source_connectors.manual_upload_connector import ManualUploadConnector
 from app.infrastructure.source_connectors.url_connector import UrlConnector, build_url_connector
@@ -34,12 +35,12 @@ def get_parser_registry() -> DocumentParserRegistry:
 @functools.cache
 def get_document_layout_reader() -> CachedDocumentLayoutReader:
     # Тот же кэш разбора, что у API: редактор и анализ не разбирают один PDF дважды.
-    return CachedDocumentLayoutReader(get_parser_registry(), get_storage())
+    return CachedDocumentLayoutReader(get_parser_registry(), get_storage(), get_parse_pool())
 
 
 @functools.cache
 def _get_manual_connector() -> ManualUploadConnector:
-    return ManualUploadConnector(get_storage(), get_parser_registry())
+    return ManualUploadConnector(get_storage(), get_parser_registry(), get_parse_pool())
 
 
 @functools.cache

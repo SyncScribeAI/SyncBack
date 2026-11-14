@@ -9,7 +9,6 @@ suggestions_total, агрегатные счётчики по статусам, 
 текущего анализа и права действий из DocumentLifecycle.
 """
 
-import asyncio
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -23,6 +22,7 @@ from app.api.schemas.editor import (
     EditorCounters,
     EditorDocumentMeta,
     EditorPermissions,
+    PageSizeResponse,
     ResetResponse,
     SuggestionGroupResponse,
 )
@@ -34,15 +34,14 @@ from app.core.dependencies import (
     get_document_service,
     get_suggestion_service,
 )
+from app.domain.document_geometry import DocumentLayout
 from app.domain.exceptions import DocumentNotFoundError, InvalidDocumentStatusError
-from app.domain.interfaces.document_parser import ParsedDocument
 from app.domain.lifecycle import DocumentLifecycle
 from app.domain.services.analysis_flag_service import AnalysisFlagService
 from app.domain.services.analysis_job_service import AnalysisJobService
 from app.domain.services.document_service import DocumentService
 from app.domain.services.suggestion_service import SuggestionService
 from app.domain.value_objects import DocumentStatusVO, FlagStatusVO, PaginationParams
-from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.project import Project
 from app.infrastructure.db.models.user import User
 
@@ -63,7 +62,8 @@ _STATUS_VIEW_MODE: dict[DocumentStatusVO, str] = {
 _SUGGESTIONS_MAX_LIMIT = 200
 
 
-def _build_editor_content(parsed: ParsedDocument) -> EditorContent:
+def _build_editor_content(layout: DocumentLayout) -> EditorContent:
+    parsed = layout.document
     return EditorContent(
         plain_text=parsed.plain_text,
         sections=[
@@ -85,6 +85,10 @@ def _build_editor_content(parsed: ParsedDocument) -> EditorContent:
             )
             for b in parsed.blocks
         ],
+        pages=[
+            PageSizeResponse(number=p.number, width=p.width, height=p.height) for p in layout.pages
+        ]
+        or None,
     )
 
 
@@ -138,12 +142,18 @@ async def get_editor_aggregate(
 
     needs_original = DocumentLifecycle.has_review_results(document.status)
 
-    # Содержимое читается из файлового хранилища, поэтому оба файла можно
-    # запрашивать параллельно. Запросы к БД ниже идут последовательно: у них одна
-    # AsyncSession на запрос, а SQLAlchemy не допускает её конкурентного использования.
-    editor_content, original_content_raw = await asyncio.gather(
-        _editor_content(document_service, document),
-        _original_content(document_service, document) if needs_original else _none(),
+    # Запросы к БД ниже идут последовательно: у них одна AsyncSession на запрос, а
+    # SQLAlchemy не допускает её конкурентного использования.
+    layout, original_layout = await document_service.get_editor_layouts(
+        document, with_original=needs_original
+    )
+    editor_content = _build_editor_content(layout)
+    original_content_raw = (
+        editor_content
+        if original_layout is layout
+        else _build_editor_content(original_layout)
+        if original_layout
+        else None
     )
     suggestions_raw, suggestions_total = await suggestion_service.list_suggestions_for_document(
         project.id,
@@ -190,18 +200,6 @@ async def get_editor_aggregate(
         suggestion_groups=[SuggestionGroupResponse.model_validate(g) for g in groups],
         flags=[AnalysisFlagResponse.model_validate(f) for f in flags],
     )
-
-
-async def _editor_content(document_service: DocumentService, document: Document) -> EditorContent:
-    return _build_editor_content(await document_service.get_document_content(document))
-
-
-async def _original_content(document_service: DocumentService, document: Document) -> EditorContent:
-    return _build_editor_content(await document_service.get_original_content(document))
-
-
-async def _none() -> None:
-    return None
 
 
 @router.post(

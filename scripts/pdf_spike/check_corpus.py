@@ -61,7 +61,9 @@ def check_runs(raw: bytes, plain: str, runs) -> tuple[int, int]:
 
 
 def strike_first_word(raw: bytes, geometry: PdfiumGeometry, word: str, out: Path):
-    document, runs = geometry.parse_with_runs(raw)
+    layout = geometry.parse_layout(raw)
+    document, runs = layout.document, layout.runs
+    assert runs is not None
     start = document.plain_text.find(word)
     if start < 0:
         return False

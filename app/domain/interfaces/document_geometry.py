@@ -1,8 +1,7 @@
 from collections.abc import Sequence
 from typing import Protocol
 
-from app.domain.document_geometry import PageRect, TextRuns
-from app.domain.interfaces.document_parser import ParsedDocument
+from app.domain.document_geometry import DocumentLayout, PageRect, TextRuns
 
 
 class DocumentGeometry(Protocol):
@@ -11,8 +10,13 @@ class DocumentGeometry(Protocol):
     Есть только у форматов с фиксированной вёрсткой; для остальных реестр отдаёт None.
     """
 
-    def parse_with_runs(self, raw_bytes: bytes) -> tuple[ParsedDocument, TextRuns]:
-        """Тот же разбор, что parse(), и карта текста к символам страниц."""
+    @property
+    def version(self) -> str:
+        """Версия эвристик разбора: от неё зависят блоки, поэтому по ней сбрасывается кэш."""
+        ...
+
+    def parse_layout(self, raw_bytes: bytes) -> DocumentLayout:
+        """Тот же разбор, что parse(), карта текста к символам страниц и размеры страниц."""
         ...
 
     def locate(

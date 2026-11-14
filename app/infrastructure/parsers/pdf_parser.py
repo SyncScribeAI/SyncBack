@@ -9,11 +9,11 @@ from collections.abc import Sequence
 
 import pypdfium2.raw as pdfium_c
 
-from app.domain.document_geometry import PageRect, TextRuns
+from app.domain.document_geometry import DocumentLayout, PageRect, TextRuns
 from app.domain.exceptions import PdfHasNoTextLayerError
 from app.domain.interfaces.document_parser import ParsedDocument
 from app.domain.source_text import SourceLayout, serialize_source_layout
-from app.infrastructure.parsers.pdf_blocks import PdfLayout, build_layout
+from app.infrastructure.parsers.pdf_blocks import PDF_PARSER_VERSION, PdfLayout, build_layout
 from app.infrastructure.parsers.pdf_lines import iter_pages, open_pdf
 
 # Совпадает со значением настройки pdf_max_pages по умолчанию.
@@ -59,8 +59,14 @@ class PdfiumGeometry:
         self._parser = parser
         self._max_pages = parser._max_pages
 
-    def parse_with_runs(self, raw_bytes: bytes) -> tuple[ParsedDocument, TextRuns]:
-        return self._parser.parse_with_runs(raw_bytes)
+    @property
+    def version(self) -> str:
+        return f"pdf-{PDF_PARSER_VERSION}"
+
+    def parse_layout(self, raw_bytes: bytes) -> DocumentLayout:
+        layout = self._parser.layout(raw_bytes)
+        document, runs = layout.to_document()
+        return DocumentLayout(document, runs, layout.pages)
 
     def locate(
         self, raw_bytes: bytes, runs: TextRuns, spans: Sequence[tuple[int, int]]

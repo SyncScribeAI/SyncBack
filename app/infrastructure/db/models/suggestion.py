@@ -114,6 +114,8 @@ class Suggestion(Base):
     # Основания правки: цитаты и их место в снимках источников (app.domain.evidence).
     # None у правок, созданных до оснований, и у правок без цитат.
     evidence: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
+    # Прямоугольники правки на страницах PDF (app.domain.document_geometry.rects_to_json).
+    geometry: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     decided_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

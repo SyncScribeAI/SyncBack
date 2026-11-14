@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
+from app.api.schemas.geometry import PageGeometryResponse
+
 
 class SuggestionSourceResponse(BaseModel):
     """Краткие данные источника, на котором основана правка."""
@@ -114,6 +116,10 @@ class SuggestionResponse(BaseModel):
         default_factory=list,
         validation_alias=AliasChoices("evidence_view", "evidence"),
         description="Основания правки; пусто, если цитаты не извлеклись или анализ старый",
+    )
+    geometry: PageGeometryResponse | None = Field(
+        default=None,
+        description="Только у PDF: где правка на страницах оригинала; None у других форматов",
     )
     status: Literal["pending", "accepted", "rejected"]
     # None — решение ещё не принято или сброшено.

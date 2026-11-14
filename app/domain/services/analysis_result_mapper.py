@@ -31,6 +31,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from app.domain.document_blocks import heading_title
+from app.domain.document_geometry import PageRect
 from app.domain.evidence import Evidence, Quote
 from app.domain.interfaces.document_analyzer import (
     AnalysisResult,
@@ -67,6 +68,8 @@ class SuggestionDraft:
     quotes: tuple[Quote, ...] = ()
     # Заполняет локатор оснований после маппинга: ему нужны тексты источников.
     evidence: tuple[Evidence, ...] = ()
+    # Прямоугольники на страницах; заполняются только у PDF, после маппинга.
+    geometry: tuple[PageRect, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +82,7 @@ class FlagDraft:
     quotes: tuple[FlagQuote, ...]
     position: int
     evidence: tuple[Evidence, ...] = ()
+    geometry: tuple[PageRect, ...] = ()
 
 
 @dataclass(slots=True)

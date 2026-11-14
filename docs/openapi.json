@@ -3174,6 +3174,17 @@
             "title": "Position",
             "description": "Порядок флага в ответе конвейера"
           },
+          "geometry": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PageGeometryResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Только у PDF: блок флага на страницах оригинала"
+          },
           "status": {
             "type": "string",
             "enum": [
@@ -4134,6 +4145,21 @@
                 "type": "null"
               }
             ]
+          },
+          "pages_without_text": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pages Without Text",
+            "description": "Только в ответе на загрузку PDF: страницы без текстового слоя (с единицы). Документ принят, но текст этих страниц в анализ и редактор не попадёт"
           }
         },
         "type": "object",
@@ -4315,6 +4341,21 @@
             "type": "array",
             "title": "Blocks",
             "default": []
+          },
+          "pages": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PageSizeResponse"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pages",
+            "description": "Только у PDF: размеры страниц в порядке просмотра, чтобы клиент разметил страницы до отрисовки и наложил прямоугольники geometry"
           }
         },
         "type": "object",
@@ -4751,6 +4792,50 @@
           "text_content"
         ],
         "title": "NoteCreateRequest"
+      },
+      "PageGeometryResponse": {
+        "properties": {
+          "rects": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "title": "Rects",
+            "description": "Прямоугольники [page, x0, y0, x1, y1]: page с единицы, координаты в точках в пространстве страницы PDF (начало внизу слева, без учёта CropBox и /Rotate), как у аннотаций. У вставки это символ перед точкой вставки"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rects"
+        ],
+        "title": "PageGeometryResponse"
+      },
+      "PageSizeResponse": {
+        "properties": {
+          "number": {
+            "type": "integer",
+            "title": "Number"
+          },
+          "width": {
+            "type": "number",
+            "title": "Width"
+          },
+          "height": {
+            "type": "number",
+            "title": "Height"
+          }
+        },
+        "type": "object",
+        "required": [
+          "number",
+          "width",
+          "height"
+        ],
+        "title": "PageSizeResponse",
+        "description": "Размер страницы в точках с учётом CropBox и поворота."
       },
       "Page_DocumentResponse_": {
         "properties": {
@@ -5993,6 +6078,17 @@
             "type": "array",
             "title": "Evidence",
             "description": "Основания правки; пусто, если цитаты не извлеклись или анализ старый"
+          },
+          "geometry": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PageGeometryResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Только у PDF: где правка на страницах оригинала; None у других форматов"
           },
           "status": {
             "type": "string",

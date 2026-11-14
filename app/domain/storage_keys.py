@@ -28,3 +28,23 @@ def document_storage_key(project_id: uuid.UUID, document_id: uuid.UUID, filename
 
 def source_storage_key(project_id: uuid.UUID, source_id: uuid.UUID, filename: str) -> str:
     return f"projects/{project_id}/sources/{source_id}{file_extension(filename)}"
+
+
+def document_layout_key(storage_key: str) -> str:
+    """Кэш разбора лежит рядом с файлом документа и удаляется вместе с ним.
+
+    Ключ не зависит от версии парсера и хэша файла: оба записаны внутри объекта и
+    сверяются при чтении, а устаревший разбор перезаписывается.
+    """
+    return f"{storage_key}.layout"
+
+
+def derived_document_keys(storage_key: str | None) -> list[str]:
+    """Объекты, которые сервис создаёт из файла документа; сейчас это кэш разбора PDF.
+
+    Для ключей источников и других объектов список пуст: кэш разбора есть только у
+    документов.
+    """
+    if storage_key and "/documents/" in storage_key and storage_key.lower().endswith(".pdf"):
+        return [document_layout_key(storage_key)]
+    return []

@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, get_settings
 from app.domain.interfaces.analysis_queue import AnalysisQueue
 from app.domain.interfaces.dashboard_query_service import IDashboardQueryService
+from app.domain.interfaces.document_layout import DocumentLayoutReader
 from app.domain.interfaces.event_publisher import IEventPublisher
 from app.domain.interfaces.llm_client import LLMClient
 from app.domain.interfaces.source_connector import SourceConnector, SourceKind
@@ -56,10 +57,11 @@ from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.events.publishers import SSEEventPublisher
 from app.infrastructure.events.sse_broker import get_sse_broker
 from app.infrastructure.exporters.exporter_registry import DocumentExporterRegistry
+from app.infrastructure.layout.cached_reader import CachedDocumentLayoutReader
 from app.infrastructure.llm.factory import get_llm_client
 from app.infrastructure.ml_pipeline.factory import pipeline_health_check
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
-from app.infrastructure.parsers.source_file_inspector import ParserSourceFileInspector
+from app.infrastructure.parsers.upload_file_inspector import ParserUploadFileInspector
 from app.infrastructure.queue.celery_analysis_queue import CeleryAnalysisQueue
 from app.infrastructure.security.jwt_handler import JWTHandler
 from app.infrastructure.security.login_rate_limiter import LoginRateLimiter
@@ -170,6 +172,10 @@ def get_project_service(
     )
 
 
+def get_document_layout_reader() -> DocumentLayoutReader:
+    return CachedDocumentLayoutReader(_get_parser_registry(), _get_file_storage())
+
+
 def get_document_service(
     uow: SqlAlchemyUnitOfWork = Depends(get_uow),
     settings: Settings = Depends(get_settings),
@@ -180,6 +186,8 @@ def get_document_service(
         parser_registry=_get_parser_registry(),
         upload_limits=UploadLimits.from_megabytes(settings.max_upload_size_mb),
         download_url_ttl_seconds=settings.s3_presigned_url_expire_seconds,
+        file_inspector=ParserUploadFileInspector(settings.pdf_max_pages),
+        layout_reader=get_document_layout_reader(),
     )
 
 
@@ -195,7 +203,7 @@ def get_source_service(
         url_policy=settings.source_url_policy,
         connector_for=_connector_for,
         max_source_chars=settings.analysis_max_source_chars,
-        file_inspector=ParserSourceFileInspector(settings.pdf_max_pages),
+        file_inspector=ParserUploadFileInspector(settings.pdf_max_pages),
     )
 
 

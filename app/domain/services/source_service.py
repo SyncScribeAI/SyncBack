@@ -37,11 +37,11 @@ from app.domain.exceptions import (
 from app.domain.interfaces.document_parser import IDocumentParserRegistry
 from app.domain.interfaces.file_storage import FileStorage, UploadContent
 from app.domain.interfaces.source_connector import SourceConnectorResolver, SourceKind, SourceRef
-from app.domain.interfaces.source_file_inspector import SourceFileInspector
 from app.domain.interfaces.unit_of_work import IUnitOfWork
+from app.domain.interfaces.upload_file_inspector import UploadFileInspector, UploadFileReport
 from app.domain.lifecycle import DocumentLifecycle
 from app.domain.policies import UploadLimits
-from app.domain.source_files import SourceFileReport, ensure_source_extension
+from app.domain.source_files import ensure_source_extension
 from app.domain.source_url import DEFAULT_SOURCE_URL_POLICY, SourceUrl, SourceUrlPolicy
 from app.domain.storage_keys import source_storage_key
 from app.domain.value_objects import SourceScopeVO, SourceTypeVO
@@ -75,7 +75,7 @@ class SourceService:
         url_policy: SourceUrlPolicy = DEFAULT_SOURCE_URL_POLICY,
         connector_for: SourceConnectorResolver | None = None,
         max_source_chars: int | None = None,
-        file_inspector: SourceFileInspector | None = None,
+        file_inspector: UploadFileInspector | None = None,
     ) -> None:
         self._uow = uow
         self._storage = file_storage
@@ -176,12 +176,12 @@ class SourceService:
         content: UploadContent,
         scope: SourceScopeVO = SourceScopeVO.PROJECT,
         document_id: uuid.UUID | None = None,
-    ) -> tuple[Source, SourceFileReport]:
+    ) -> tuple[Source, UploadFileReport]:
         """Файл проверяется до записи: отказ не оставляет в хранилище ничего."""
         ensure_source_extension(filename)
         if self._upload_limits.exceeded_by(content.size):
             raise FileTooLargeError(f"Файл превышает лимит {self._upload_limits.max_size_mb} МБ")
-        report = SourceFileReport()
+        report = UploadFileReport()
         if self._file_inspector is not None:
             report = await self._file_inspector.inspect(filename, content)
         source = await self._create_stored_source(

@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.api.schemas.geometry import PageGeometryResponse
+
 
 class FlagQuoteResponse(BaseModel):
     """Цитата источника, из-за которой место нужно проверить."""
@@ -40,6 +42,9 @@ class AnalysisFlagResponse(BaseModel):
     rationale: str | None = None
     quotes: list[FlagQuoteResponse] = []
     position: int = Field(description="Порядок флага в ответе конвейера")
+    geometry: PageGeometryResponse | None = Field(
+        default=None, description="Только у PDF: блок флага на страницах оригинала"
+    )
     status: Literal["pending", "reviewed"]
     decided_by: uuid.UUID | None = None
     decided_at: datetime | None = None

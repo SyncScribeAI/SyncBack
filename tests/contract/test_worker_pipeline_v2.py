@@ -900,6 +900,68 @@ async def test_deleting_document_removes_unreferenced_snapshots(
     assert snapshot.storage_key not in worker.uploads
 
 
+@pytest.mark.parametrize(
+    ("failures", "respond", "error_code"),
+    [
+        ([LLMInvalidResponseError("не по контракту")], None, "LLM_INVALID_RESPONSE"),
+        ([LLMTimeoutError("нет ответа")], None, "LLM_UNAVAILABLE"),
+        (
+            [],
+            lambda request: AnalysisResult(
+                status=AnalysisStatus.FAILED,
+                error=AnalysisError(AnalysisErrorCode.INVALID_REQUEST, "нет блоков"),
+            ),
+            "ML_INVALID_REQUEST",
+        ),
+        (
+            [],
+            lambda request: AnalysisResult(
+                status=AnalysisStatus.FAILED,
+                error=AnalysisError(AnalysisErrorCode.PIPELINE_ERROR, "GPU занят"),
+            ),
+            "LLM_UNAVAILABLE",
+        ),
+    ],
+)
+async def test_failed_job_registers_stored_snapshots(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,  # noqa: F811
+    worker: Worker,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    failures: list[Exception],
+    respond: Respond | None,
+    error_code: str,
+) -> None:
+    """Снимок, сохранённый до отказа, получает запись и удаляется вместе с документом."""
+    from app.infrastructure.db.models.source_snapshot import (
+        AnalysisJobSourceSnapshot,
+        SourceSnapshotModel,
+    )
+
+    worker.configure(monkeypatch, analysis_retry_limit=0)
+    worker.analyzer.failures = list(failures)
+    if respond is not None:
+        worker.analyzer.respond = respond
+    headers, project_id, document_id, job_id, source_ids = await _start(client, queue, ["A"])
+
+    assert await v2.analyze_document(job_id, source_ids, 0) is None
+
+    job = await _job(sessionmaker, job_id)
+    assert (job.status.value, job.error_code) == ("failed", error_code)
+    async with sessionmaker() as session:
+        [snapshot] = (await session.execute(select(SourceSnapshotModel))).scalars().all()
+        rows = (await session.execute(select(AnalysisJobSourceSnapshot))).scalars().all()
+    assert [(str(row.job_id), row.snapshot_id) for row in rows] == [(job_id, snapshot.id)]
+    assert snapshot.storage_key in worker.uploads
+
+    response = await client.delete(
+        f"/api/v1/projects/{project_id}/documents/{document_id}", headers=headers
+    )
+    assert response.status_code == 204, response.text
+    assert snapshot.storage_key not in worker.uploads
+
+
 async def test_retry_reuses_snapshot_objects_and_writes_rows_once(
     client: AsyncClient,
     queue: FakeAnalysisQueue,  # noqa: F811

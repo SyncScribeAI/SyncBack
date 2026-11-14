@@ -9,6 +9,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -206,7 +207,7 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         # закрепил бы пропуски. Поиск идёт по ix_analysis_jobs_doc_latest.
         row = (
             await self._session.execute(
-                select(AnalysisJob.id, AnalysisJob.input_hash)
+                select(AnalysisJob.id, AnalysisJob.input_hash, AnalysisJob.pipeline_meta)
                 .where(
                     AnalysisJob.document_id == document_id,
                     AnalysisJob.id != exclude_job_id,
@@ -221,15 +222,37 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         ).first()
         if row is None or row.input_hash is None:
             return None
-        return Baseline(job_id=row.id, input_hash=row.input_hash)
+        meta = row.pipeline_meta or {}
+        incremental = meta.get("incremental") or {}
+        chain = incremental.get("chain_length")
+        document_hash = incremental.get("document_hash")
+        return Baseline(
+            job_id=row.id,
+            input_hash=row.input_hash,
+            document_hash=document_hash if isinstance(document_hash, str) else None,
+            contract_version=meta.get("contract_version"),
+            provider=meta.get("provider"),
+            chain_length=chain if isinstance(chain, int) else 0,
+        )
 
     async def record_input(self, job: AnalysisJob, run_input: RunInput) -> None:
         job.input_hash = run_input.input_hash
+        job.baseline_job_id = run_input.baseline_job_id
         meta = dict(job.pipeline_meta or {})
         meta.setdefault("contract_version", run_input.contract_version)
         meta.setdefault("provider", run_input.provider)
         meta["incremental"] = run_input.incremental_meta()
         meta["run_stats"] = run_input.run_stats_meta(meta.get("meta"))
+        job.pipeline_meta = meta
+
+    async def record_audit(self, job_id: uuid.UUID, audit: dict[str, Any]) -> None:
+        job = await self._session.get(AnalysisJob, job_id, with_for_update=True)
+        if job is None:
+            return
+        meta = dict(job.pipeline_meta or {})
+        incremental = dict(meta.get("incremental") or {})
+        incremental["audit"] = audit
+        meta["incremental"] = incremental
         job.pipeline_meta = meta
 
     async def record_reuse(self, job: AnalysisJob, baseline_job_id: uuid.UUID) -> None:

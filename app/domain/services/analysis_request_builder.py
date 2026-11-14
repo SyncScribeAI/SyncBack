@@ -7,7 +7,7 @@
 """
 
 import uuid
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 
 from app.domain.exceptions import LLMInputTooLargeError
@@ -45,13 +45,16 @@ def build_analysis_request(
     document: DocumentInput,
     sources: Iterable[SourcePayload],
     limits: AnalysisLimits = AnalysisLimits(),
+    editable: Collection[str] | None = None,
 ) -> AnalysisRequest:
     """O(B + K): один проход по блокам и источникам, уникальность ref — через set.
 
     request_id включает номер попытки: ответ на прошлую попытку, пришедший с опозданием,
-    не будет принят за ответ на текущую.
+    не будет принят за ответ на текущую. editable сужает проверяемые блоки до выбранных
+    инкрементальным анализом; остальные уходят контекстом, чтобы модель видела документ
+    целиком.
     """
-    blocks = _block_payloads(document, limits)
+    blocks = _block_payloads(document, limits, editable)
     source_payloads = tuple(sources)
     if limits.max_sources is not None and len(source_payloads) > limits.max_sources:
         raise LLMInputTooLargeError(
@@ -67,7 +70,9 @@ def build_analysis_request(
     )
 
 
-def _block_payloads(document: DocumentInput, limits: AnalysisLimits) -> tuple[BlockPayload, ...]:
+def _block_payloads(
+    document: DocumentInput, limits: AnalysisLimits, editable: Collection[str] | None
+) -> tuple[BlockPayload, ...]:
     seen: set[str] = set()
     payloads: list[BlockPayload] = []
     for block in document.blocks:
@@ -86,7 +91,7 @@ def _block_payloads(document: DocumentInput, limits: AnalysisLimits) -> tuple[Bl
                 ref=block.ref,
                 type=block.type,
                 text=block.text_in(document.plain_text),
-                editable=block.editable,
+                editable=block.editable and (editable is None or block.ref in editable),
                 start_offset=block.start_offset,
             )
         )

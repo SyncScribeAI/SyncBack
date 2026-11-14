@@ -51,6 +51,11 @@ class AnalysisJob(Base):
         # Последняя задача документа: WHERE document_id = ? ORDER BY created_at DESC.
         Index("ix_analysis_jobs_doc_latest", "document_id", "created_at"),
         CheckConstraint("strategy IN ('auto', 'full')", name="ck_analysis_jobs_strategy"),
+        Index(
+            "ix_analysis_jobs_baseline_job_id",
+            "baseline_job_id",
+            postgresql_where=text("baseline_job_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -90,6 +95,12 @@ class AnalysisJob(Base):
     # auto разрешает перенос результата прошлой задачи, full всегда вызывает ML.
     strategy: Mapped[str] = mapped_column(
         String(8), nullable=False, default="auto", server_default="auto"
+    )
+    # Задача, результат которой перенесён целиком или частично; NULL у полного анализа.
+    baseline_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("analysis_jobs.id", ondelete="SET NULL"),
+        nullable=True,
     )
     checked_blocks: Mapped[int | None] = mapped_column(Integer, nullable=True)
     failed_blocks: Mapped[int | None] = mapped_column(Integer, nullable=True)

@@ -14,6 +14,7 @@ from typing import Any, cast
 from sqlalchemy import CursorResult, Table, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.baseline_result import BaselineFlag, evidence_refs
 from app.domain.interfaces.repositories import IAnalysisFlagRepository
 from app.domain.value_objects import FlagStatusVO
 from app.infrastructure.db.models.analysis_flag import AnalysisFlag
@@ -30,10 +31,36 @@ class AnalysisFlagRepository(IAnalysisFlagRepository):
         self._session.add_all(flags)
         await self._session.flush()
 
-    async def carry_over(self, from_job_id: uuid.UUID, to_job_id: uuid.UUID) -> int:
+    async def carry_over(
+        self,
+        from_job_id: uuid.UUID,
+        to_job_id: uuid.UUID,
+        only: Sequence[uuid.UUID] | None = None,
+    ) -> int:
         return await copy_job_rows(
-            self._session, cast(Table, AnalysisFlag.__table__), from_job_id, to_job_id
+            self._session, cast(Table, AnalysisFlag.__table__), from_job_id, to_job_id, only
         )
+
+    async def baseline_rows(self, job_id: uuid.UUID) -> list[BaselineFlag]:
+        rows = await self._session.execute(
+            select(
+                AnalysisFlag.id,
+                AnalysisFlag.block_id,
+                AnalysisFlag.reason,
+                AnalysisFlag.status,
+                AnalysisFlag.quotes,
+            ).where(AnalysisFlag.analysis_job_id == job_id)
+        )
+        return [
+            BaselineFlag(
+                id=row.id,
+                block_ref=row.block_id,
+                reason=row.reason,
+                decided=row.status != FlagStatusVO.PENDING.value,
+                evidence=evidence_refs(row.quotes),
+            )
+            for row in rows
+        ]
 
     async def get_by_id(self, flag_id: uuid.UUID) -> AnalysisFlag | None:
         return await self._session.get(AnalysisFlag, flag_id)

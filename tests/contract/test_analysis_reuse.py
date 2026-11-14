@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import Any
 
 import pytest
 from httpx import AsyncClient
@@ -134,10 +135,12 @@ async def test_unchanged_input_reuses_result_with_decisions(
     assert second.request_id is None
     assert second.checked_blocks == first.checked_blocks
     assert second.pipeline_meta is not None
-    assert second.pipeline_meta["incremental"] == {
+    assert _meta(second.pipeline_meta["incremental"]) == {
         "mode": "reused",
         "reason": "reused",
         "baseline_job_id": first_id,
+        "chain_length": 0,
+        "fallback_reason": None,
     }
     stats = second.pipeline_meta["run_stats"]
     assert (stats["segments_sent"], stats["chars_sent"], stats["blocks_checked"]) == (0, 0, 0)
@@ -211,10 +214,12 @@ async def test_strategy_full_calls_pipeline_and_measures_delta(
     second = await _job(sessionmaker, second_id)
     assert second.strategy == "full"
     assert second.pipeline_meta is not None
-    assert second.pipeline_meta["incremental"] == {
+    assert _meta(second.pipeline_meta["incremental"]) == {
         "mode": "full",
         "reason": "strategy_full",
         "baseline_job_id": first_id,
+        "chain_length": 0,
+        "fallback_reason": "strategy_full",
         "changed_share": 0.0,
         "segments_added": 0,
         "segments_removed": 0,
@@ -296,8 +301,16 @@ async def test_partial_job_is_not_a_baseline(
     third = await _job(sessionmaker, third_id)
     assert second.pipeline_meta is not None and third.pipeline_meta is not None
     assert second.pipeline_meta["incremental"]["reason"] == "no_baseline"
-    assert third.pipeline_meta["incremental"] == {
+    assert _meta(third.pipeline_meta["incremental"]) == {
         "mode": "reused",
         "reason": "reused",
         "baseline_job_id": second_id,
+        "chain_length": 0,
+        "fallback_reason": None,
     }
+
+
+def _meta(incremental: dict[str, Any]) -> dict[str, Any]:
+    """meta без хэша документа: он зависит от байтов тестового файла."""
+    assert len(incremental["document_hash"]) == 64
+    return {key: value for key, value in incremental.items() if key != "document_hash"}

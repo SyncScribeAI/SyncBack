@@ -19,6 +19,7 @@ from typing import Any, cast
 from sqlalchemy import CursorResult, Table, case, func, insert, literal, null, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.baseline_result import BaselineSuggestion, evidence_refs
 from app.domain.exceptions import SuggestionAlreadyDecidedError
 from app.domain.interfaces.repositories import ISuggestionRepository
 from app.domain.value_objects import (
@@ -215,10 +216,54 @@ class SuggestionRepository(ISuggestionRepository):
         await self._session.flush()
         return suggestions
 
-    async def carry_over(self, from_job_id: uuid.UUID, to_job_id: uuid.UUID) -> int:
-        copied = await copy_job_rows(
-            self._session, cast(Table, Suggestion.__table__), from_job_id, to_job_id
+    async def baseline_rows(self, job_id: uuid.UUID) -> list[BaselineSuggestion]:
+        # Только поля правил переноса: тексты обоснований и геометрия в память не читаются.
+        rows = await self._session.execute(
+            select(
+                Suggestion.id,
+                Suggestion.block_id,
+                Suggestion.section_ref,
+                Suggestion.change_type,
+                Suggestion.original_text,
+                Suggestion.suggested_text,
+                Suggestion.status,
+                Suggestion.evidence,
+            ).where(Suggestion.analysis_job_id == job_id)
         )
+        return [
+            BaselineSuggestion(
+                id=row.id,
+                block_ref=row.block_id,
+                section_ref=row.section_ref,
+                change_type=row.change_type.value,
+                original_text=row.original_text,
+                suggested_text=row.suggested_text,
+                decided=row.status != SuggestionStatus.PENDING,
+                evidence=evidence_refs(row.evidence),
+            )
+            for row in rows
+        ]
+
+    async def carry_over(
+        self,
+        from_job_id: uuid.UUID,
+        to_job_id: uuid.UUID,
+        only: Sequence[uuid.UUID] | None = None,
+        stale: Sequence[uuid.UUID] = (),
+    ) -> int:
+        copied = await copy_job_rows(
+            self._session, cast(Table, Suggestion.__table__), from_job_id, to_job_id, only
+        )
+        if copied and stale:
+            await self._session.execute(
+                update(Suggestion)
+                .where(
+                    Suggestion.analysis_job_id == to_job_id,
+                    Suggestion.carried_from_id.in_(list(stale)),
+                )
+                .values(stale=True)
+                .execution_options(synchronize_session=False)
+            )
         if copied:
             # Связи с источниками идут через carried_from_id одним INSERT ... SELECT.
             new = Suggestion.__table__.alias("new")

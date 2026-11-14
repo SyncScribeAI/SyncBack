@@ -53,6 +53,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from app.core.config import get_settings
 from app.domain.analysis_reuse import (
     AnalysisStrategy,
+    Baseline,
     DeltaFallback,
     DeltaPolicy,
     DeltaSummary,
@@ -63,6 +64,7 @@ from app.domain.analysis_reuse import (
     analysis_input_hash,
     decide_reuse,
     delta_precheck,
+    sources_replaced_check,
 )
 from app.domain.document_geometry import highlight_span
 from app.domain.evidence import EvidenceSource, evidence_sources_of
@@ -409,45 +411,63 @@ async def _plan_delta(
         policy=policy,
     )
     if fallback is None:
-        async with uow_factory() as uow:
-            baseline_sources = await uow.snapshots.list_job_sources(baseline.job_id)
-            suggestions = await uow.suggestions.baseline_rows(baseline.job_id)
-            flags = await uow.flags.baseline_rows(baseline.job_id)
-        fingerprints = await load_baseline_fingerprints(
-            get_storage(), baseline_sources, fetched.snapshots, job.id
-        )
-        if fingerprints is None:
-            fallback = DeltaFallback.FINGERPRINTS_UNAVAILABLE
-        else:
-            planned = build_delta_request(
-                baseline=baseline,
-                fingerprints=fingerprints,
-                document=document,
-                payloads=fetched.payloads,
-                segments=fetched.segments,
-                suggestions=suggestions,
-                flags=flags,
-                policy=policy,
-                limits=_delta_limits(),
-            )
-            if isinstance(planned, DeltaRequest):
-                logger.info(
-                    "Анализ v2: выборочная проверка блоков",
-                    extra={
-                        "job_id": str(job.id),
-                        "baseline_job_id": str(baseline.job_id),
-                        **planned.selected.as_meta(),
-                        "segments_sent": planned.stats.segments_sent,
-                        "segments_total": planned.stats.segments_total,
-                    },
-                )
-                return planned
-            fallback = planned
+        planned = await _plan_from_baseline(job, baseline, document, fetched, policy)
+        if isinstance(planned, DeltaRequest):
+            return planned
+        fallback = planned
     logger.info(
         "Анализ v2: выборочная проверка заменена полным анализом",
         extra={"job_id": str(job.id), "fallback_reason": fallback.value},
     )
     return fallback
+
+
+async def _plan_from_baseline(
+    job: _StartedJob,
+    baseline: Baseline,
+    document: DocumentInput,
+    fetched: _FetchedSources,
+    policy: DeltaPolicy,
+) -> DeltaRequest | DeltaFallback:
+    """Выборочный запрос против прошлой задачи или причина отказа от него."""
+    async with uow_factory() as uow:
+        baseline_sources = await uow.snapshots.list_job_sources(baseline.job_id)
+        suggestions = await uow.suggestions.baseline_rows(baseline.job_id)
+        flags = await uow.flags.baseline_rows(baseline.job_id)
+    replaced = sources_replaced_check(
+        (row.source_id for row in baseline_sources if row.source_id is not None),
+        (uuid.UUID(payload.id) for payload in fetched.payloads),
+    )
+    if replaced is not None:
+        return replaced
+    fingerprints = await load_baseline_fingerprints(
+        get_storage(), baseline_sources, fetched.snapshots, job.id
+    )
+    if fingerprints is None:
+        return DeltaFallback.FINGERPRINTS_UNAVAILABLE
+    planned = build_delta_request(
+        baseline=baseline,
+        fingerprints=fingerprints,
+        document=document,
+        payloads=fetched.payloads,
+        segments=fetched.segments,
+        suggestions=suggestions,
+        flags=flags,
+        policy=policy,
+        limits=_delta_limits(),
+    )
+    if isinstance(planned, DeltaRequest):
+        logger.info(
+            "Анализ v2: выборочная проверка блоков",
+            extra={
+                "job_id": str(job.id),
+                "baseline_job_id": str(baseline.job_id),
+                **planned.selected.as_meta(),
+                "segments_sent": planned.stats.segments_sent,
+                "segments_total": planned.stats.segments_total,
+            },
+        )
+    return planned
 
 
 def _delta_policy() -> DeltaPolicy:
@@ -579,7 +599,7 @@ async def _decide(
         provider=_settings.analysis_provider,
         document_hash=document_hash,
         sources=[
-            (payload.name, snapshot.content_hash)
+            (payload.id, payload.type.value, payload.name, snapshot.content_hash)
             for payload, snapshot in zip(fetched.payloads, fetched.snapshots, strict=True)
         ],
     )

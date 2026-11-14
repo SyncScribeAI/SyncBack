@@ -29,8 +29,8 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
-.venv/
-venv/
+.venv
+venv
 
 # Логи и артефакты локальных прогонов/E2E-тестов
 *.log

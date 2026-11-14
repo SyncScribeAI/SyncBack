@@ -6,30 +6,37 @@ ManualUploadConnector — скачивает файл из хранилища и
 """
 
 from app.domain.interfaces.file_storage import FileStorage
+from app.domain.interfaces.parse_pool import UNBOUNDED_PARSE_POOL, ParsePool
 from app.domain.interfaces.source_connector import SourceKind, SourceMetadata, SourceRef
 from app.domain.source_text import SourceLayout
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 
 
 class ManualUploadConnector:
-    def __init__(self, file_storage: FileStorage, parser_registry: DocumentParserRegistry):
+    def __init__(
+        self,
+        file_storage: FileStorage,
+        parser_registry: DocumentParserRegistry,
+        parse_pool: ParsePool = UNBOUNDED_PARSE_POOL,
+    ):
         self._storage = file_storage
         self._parsers = parser_registry
+        self._pool = parse_pool
 
     def supports(self, source_type: SourceKind) -> bool:
         return source_type == SourceKind.FILE
 
     async def fetch(self, source: SourceRef) -> str:
         storage_key, raw_bytes = await self._download(source)
-        return self._parsers.extract_text(storage_key, raw_bytes)
+        return await self._pool.run(self._parsers.extract_text, storage_key, raw_bytes)
 
     async def fetch_structured(self, source: SourceRef) -> str:
         storage_key, raw_bytes = await self._download(source)
-        return self._parsers.extract_source_text(storage_key, raw_bytes)
+        return await self._pool.run(self._parsers.extract_source_text, storage_key, raw_bytes)
 
     async def fetch_layout(self, source: SourceRef) -> SourceLayout:
         storage_key, raw_bytes = await self._download(source)
-        return self._parsers.extract_source_layout(storage_key, raw_bytes)
+        return await self._pool.run(self._parsers.extract_source_layout, storage_key, raw_bytes)
 
     async def _download(self, source: SourceRef) -> tuple[str, bytes]:
         if source.type != SourceKind.FILE:

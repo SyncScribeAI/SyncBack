@@ -41,6 +41,7 @@ from app.domain.exceptions import (
     SourceFetchError,
     SourceRequiresAuthError,
 )
+from app.domain.interfaces.parse_pool import UNBOUNDED_PARSE_POOL, ParsePool
 from app.domain.interfaces.source_connector import SourceKind, SourceMetadata, SourceRef
 from app.domain.source_text import SourceLayout
 from app.domain.source_url import (
@@ -49,6 +50,7 @@ from app.domain.source_url import (
     SourceUrl,
     SourceUrlPolicy,
 )
+from app.infrastructure.parsers.parse_pool import get_parse_pool
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 from app.infrastructure.source_connectors.source_content import (
     FetchedContent,
@@ -135,7 +137,9 @@ class UrlConnector:
         ca_bundle: str = "",
         auth_headers: AuthHeaders | None = None,
         converter: SourceContentConverter | None = None,
+        parse_pool: ParsePool = UNBOUNDED_PARSE_POOL,
     ) -> None:
+        self._pool = parse_pool
         self._converter = converter or SourceContentConverter(DocumentParserRegistry())
         self._max_bytes = max_bytes
         self._max_redirects = max_redirects
@@ -159,10 +163,11 @@ class UrlConnector:
 
     async def fetch(self, source: SourceRef) -> str:
         content = await self.fetch_content(source)
-        return self._to_text(content.raw, content.media_type)
+        return await self._pool.run(self._to_text, content.raw, content.media_type)
 
     async def fetch_structured(self, source: SourceRef) -> str:
-        return self._converter.to_source_text(await self.fetch_content(source))
+        content = await self.fetch_content(source)
+        return await self._pool.run(self._converter.to_source_text, content)
 
     async def fetch_layout(self, source: SourceRef) -> SourceLayout:
         # Страница не файл: подсветка идёт по тексту снимка, положения в оригинале нет.
@@ -341,6 +346,7 @@ def build_url_connector(settings: Settings) -> UrlConnector:
         ),
         ca_bundle=settings.source_url_ca_bundle,
         auth_headers=load_auth_headers(settings.source_url_auth_headers_file),
+        parse_pool=get_parse_pool(),
         converter=SourceContentConverter(
             DocumentParserRegistry(),
             HtmlOptions(

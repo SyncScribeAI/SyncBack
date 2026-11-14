@@ -99,7 +99,7 @@ def _connector_for(kind: SourceKind) -> SourceConnector:
 
 @lru_cache
 def _get_exporter_registry() -> DocumentExporterRegistry:
-    return DocumentExporterRegistry()
+    return DocumentExporterRegistry(pdf_annotation_author=get_settings().pdf_annotation_author)
 
 
 @lru_cache

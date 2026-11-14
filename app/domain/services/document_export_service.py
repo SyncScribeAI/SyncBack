@@ -10,8 +10,10 @@ uow.suggestions, а не через SuggestionService — иначе получ�
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
+from app.domain.document_geometry import rects_from_json
 from app.domain.exceptions import InvalidDocumentStatusError, UnsupportedExportFormatError
 from app.domain.interfaces.document_exporter import AppliedChange, DocumentExporterRegistry
 from app.domain.interfaces.file_storage import FileStorage, UploadContent
@@ -98,12 +100,14 @@ class DocumentExportService:
         """Исходный файл из хранилища с применёнными принятыми правками.
 
         Файл скачивается вне UoW: I/O хранилища не должен держать транзакцию БД.
+        Экспортёр работает в отдельном потоке: сборка PDF или DOCX занимает CPU на секунды,
+        и в потоке событий она остановила бы все запросы процесса API.
         """
         raw_bytes = await self._storage.download(document.storage_key)
         async with self._uow:
             changes = await self._iter_accepted_changes_pages(document)
         exporter = self._exporters.get_exporter(DocumentFormatVO(document.format))
-        return exporter.apply_changes(raw_bytes, changes)
+        return await asyncio.to_thread(exporter.apply_changes, raw_bytes, changes)
 
     async def _iter_accepted_changes_pages(self, document: Document) -> list[AppliedChange]:
         """Курсорный обход принятых правок страницами по _EXPORT_PAGE_SIZE.
@@ -145,6 +149,7 @@ class DocumentExportService:
                     new_text=s.edited_text or s.suggested_text,
                     start_offset=s.start_offset,
                     end_offset=s.end_offset,
+                    rects=rects_from_json(s.geometry),
                 )
                 for s in page
             )

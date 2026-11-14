@@ -1134,10 +1134,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Целевой формат экспорта: md, docx, txt.",
+              "description": "Целевой формат экспорта: md, docx, txt, pdf.",
               "title": "Export Format"
             },
-            "description": "Целевой формат экспорта: md, docx, txt."
+            "description": "Целевой формат экспорта: md, docx, txt, pdf."
           }
         ],
         "responses": {

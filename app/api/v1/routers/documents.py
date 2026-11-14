@@ -54,6 +54,7 @@ _EXPORT_FORMAT_MAP: dict[str, DocumentFormatVO] = {
     "md": DocumentFormatVO.MARKDOWN,
     "docx": DocumentFormatVO.DOCX,
     "txt": DocumentFormatVO.TXT,
+    "pdf": DocumentFormatVO.PDF,
 }
 
 _STATUS_FILTER_MAP: dict[str, DocumentStatusVO] = {vo.value: vo for vo in DocumentStatusVO}
@@ -294,7 +295,7 @@ async def export_document(
     audit_log_service: AuditLogService = Depends(get_audit_log_service),
     export_format: str | None = Query(
         default=None,
-        description="Целевой формат экспорта: md, docx, txt.",
+        description="Целевой формат экспорта: md, docx, txt, pdf.",
     ),
 ) -> Response:
     target_format: DocumentFormatVO | None = None

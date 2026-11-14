@@ -104,3 +104,17 @@ def test_parse_document_ids_validates_input() -> None:
     with pytest.raises(HTTPException) as invalid:
         parse_document_ids("not-a-uuid")
     assert invalid.value.status_code == 422
+
+
+async def test_stop_finishes_when_subscriber_queue_is_full() -> None:
+    broker = InMemorySSEBroker()
+    user_id = uuid.uuid4()
+    _, queue = await broker.subscribe(user_id, frozenset())
+    for _ in range(SUBSCRIBER_QUEUE_SIZE + 5):
+        await broker.publish(_event(user_id))
+
+    await asyncio.wait_for(broker.stop(), timeout=1)
+
+    items = [queue.get_nowait() for _ in range(queue.qsize())]
+    assert items[-1] is None
+    assert len(items) == SUBSCRIBER_QUEUE_SIZE

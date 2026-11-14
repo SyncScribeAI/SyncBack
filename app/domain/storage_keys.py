@@ -39,6 +39,15 @@ def document_layout_key(storage_key: str) -> str:
     return f"{storage_key}.layout"
 
 
+def exported_document_key(storage_key: str) -> str:
+    """Свой ключ на каждую сборку экспорта.
+
+    Сборка загружается до фиксации транзакции ревью. С постоянным ключом откат оставил
+    бы в БД прежний ключ, но под ним уже лежал бы новый, не утверждённый файл.
+    """
+    return f"{storage_key}.exported.{uuid.uuid4().hex}"
+
+
 def derived_document_keys(storage_key: str | None) -> list[str]:
     """Объекты, которые сервис создаёт из файла документа; сейчас это кэш разбора PDF.
 

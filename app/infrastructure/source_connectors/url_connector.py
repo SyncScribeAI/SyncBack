@@ -13,8 +13,9 @@ TLS-сертификата работают как обычно. Редирек�
 Ответ читается потоком и обрывается ошибкой при превышении лимита, а не
 буферизуется целиком.
 
-Заголовки авторизации из настроек привязаны к хосту: они уходят только на
-свой хост, после редиректа на другой хост не отправляются и в лог не пишутся.
+Заголовки авторизации из настроек привязаны к HTTPS-origin (схема, хост, порт):
+по HTTP и на другой порт того же имени они не уходят, после редиректа выбираются
+заново по новому origin и в лог не пишутся.
 """
 
 from __future__ import annotations
@@ -71,29 +72,62 @@ _PASSWORD_INPUT: Final = re.compile(rb"<input\b[^>]*\btype\s*=\s*[\"']?password"
 Resolver = Callable[[str, int], Awaitable[list[IpAddress]]]
 RobotsMode = Literal["off", "log", "enforce"]
 AuthHeaders = Mapping[str, Mapping[str, str]]
+_Origin = tuple[str, int]
+_HTTPS_PORT: Final = 443
 
 
 def load_auth_headers(path: str) -> dict[str, dict[str, str]]:
-    """Читает JSON вида {"хост": {"Заголовок": "значение"}} из секрета compose.
+    """Читает JSON вида {"origin": {"Заголовок": "значение"}} из секрета compose.
 
-    Пустой путь означает, что авторизация не настроена. Значения заголовков в
-    сообщения об ошибках не попадают.
+    Ключ задаёт HTTPS-origin: «wiki.corp» означает https://wiki.corp:443, порт
+    указывается явно как «https://wiki.corp:8443». Ключ с http:// отклоняется при
+    загрузке: секрет по открытому каналу виден всем на пути. Пустой путь означает,
+    что авторизация не настроена. Значения заголовков в сообщения не попадают.
     """
     if not path:
         return {}
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        raise ValueError("Файл заголовков авторизации должен содержать объект «хост: заголовки»")
+        raise ValueError("Файл заголовков авторизации должен содержать объект «origin: заголовки»")
     result: dict[str, dict[str, str]] = {}
-    for host, headers in data.items():
-        if not isinstance(host, str) or not isinstance(headers, dict):
-            raise ValueError("Файл заголовков авторизации: ожидается «хост: {заголовок: значение}»")
+    for key, headers in data.items():
+        if not isinstance(key, str) or not isinstance(headers, dict):
+            raise ValueError(
+                "Файл заголовков авторизации: ожидается «origin: {заголовок: значение}»"
+            )
         if not all(isinstance(k, str) and isinstance(v, str) for k, v in headers.items()):
             raise ValueError(
-                f"Файл заголовков авторизации: значения для {host} должны быть строками"
+                f"Файл заголовков авторизации: значения для {key} должны быть строками"
             )
-        result[host.strip().rstrip(".").lower()] = dict(headers)
+        host, port = parse_auth_origin(key)
+        result[_origin_key(host, port)] = dict(headers)
     return result
+
+
+def parse_auth_origin(key: str) -> _Origin:
+    """Ключ файла заголовков в пару (хост, порт) HTTPS-origin."""
+    text = key.strip()
+    if "://" not in text:
+        text = f"https://{text}"
+    try:
+        parts = urlsplit(text)
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError(f"Файл заголовков авторизации: неверный origin {key}") from exc
+    if parts.scheme.lower() != "https":
+        raise ValueError(
+            f"Файл заголовков авторизации: {key} должен быть HTTPS-origin, "
+            "заголовки по HTTP передаются открыто"
+        )
+    host = (parts.hostname or "").rstrip(".").lower()
+    if not host or parts.path not in ("", "/") or parts.query or parts.username:
+        raise ValueError(f"Файл заголовков авторизации: {key} должен быть origin без пути")
+    return host, port or _HTTPS_PORT
+
+
+def _origin_key(host: str, port: int) -> str:
+    shown = f"[{host}]" if ":" in host else host
+    return f"https://{shown}:{port}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,8 +179,8 @@ class UrlConnector:
         self._user_agent = user_agent
         self._robots = robots
         self._timeout = timeout
-        self._auth_headers = {
-            host.lower(): dict(headers) for host, headers in (auth_headers or {}).items()
+        self._auth_headers: dict[_Origin, dict[str, str]] = {
+            parse_auth_origin(key): dict(headers) for key, headers in (auth_headers or {}).items()
         }
         # Проверка сертификата включена всегда; свой CA добавляет доверие к
         # внутреннему удостоверяющему центру, а не отключает проверку.
@@ -201,7 +235,7 @@ class UrlConnector:
         origin_host = url.host
         for _ in range(self._max_redirects + 1):
             address = await self._pick_address(url)
-            request = self._pinned_request(url, address, self._auth_headers.get(url.host))
+            request = self._pinned_request(url, address, self._auth_for(url))
             async with client.stream(
                 "GET", request.url, headers=request.headers, extensions=request.extensions
             ) as response:
@@ -220,6 +254,12 @@ class UrlConnector:
                     raise SourceRequiresAuthError()
                 return FetchedContent.from_content_type(raw, content_type, url.value)
         raise SourceFetchError(f"Слишком много редиректов (больше {self._max_redirects})")
+
+    def _auth_for(self, url: SourceUrl) -> Mapping[str, str] | None:
+        """Заголовки только для своего HTTPS-origin; редирект выбирает их заново."""
+        if url.scheme != "https":
+            return None
+        return self._auth_headers.get((url.host, url.port))
 
     @staticmethod
     def _is_login_page(raw: bytes, content_type: str) -> bool:
@@ -288,24 +328,45 @@ class UrlConnector:
             async with asyncio.timeout(_ROBOTS_TIMEOUT):
                 address = await self._pick_address(robots)
                 request = self._pinned_request(robots, address)
-                response = await client.get(
-                    request.url, headers=request.headers, extensions=request.extensions
-                )
+                async with client.stream(
+                    "GET", request.url, headers=request.headers, extensions=request.extensions
+                ) as response:
+                    if response.status_code != 200:
+                        return
+                    raw = await self._read_robots(response, url.value)
         except (TimeoutError, httpx.HTTPError, SourceFetchError) as exc:
             logger.debug(
                 "robots.txt недоступен, продолжаем", extra={"url": url.value, "exc": str(exc)}
             )
             return
-        if response.status_code != 200:
-            return
 
         parser = urllib.robotparser.RobotFileParser()
-        parser.parse(response.text[:_ROBOTS_MAX_BYTES].splitlines())
+        parser.parse(raw.decode("utf-8", errors="replace").splitlines())
         if parser.can_fetch(self._user_agent, url.value):
             return
         if self._robots == "enforce":
             raise SourceFetchError("robots.txt сайта запрещает загрузку этой страницы")
         logger.warning("robots.txt запрещает скачивание", extra={"url": url.value})
+
+    @staticmethod
+    async def _read_robots(response: httpx.Response, url: str) -> bytes:
+        """Первые _ROBOTS_MAX_BYTES байт: остальное не читается из сети.
+
+        RFC 9309 требует разбирать не меньше 500 КиБ и разрешает игнорировать хвост,
+        поэтому большой файл обрезается, а не считается недоступным: правила из его
+        начала действуют и в режиме enforce.
+        """
+        declared = response.headers.get("content-length")
+        if declared is not None and declared.isdigit() and int(declared) > _ROBOTS_MAX_BYTES:
+            logger.info("robots.txt больше лимита, читаем начало", extra={"url": url})
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in response.aiter_bytes():
+            chunks.append(chunk[: _ROBOTS_MAX_BYTES - total])
+            total += len(chunks[-1])
+            if total >= _ROBOTS_MAX_BYTES:
+                break
+        return b"".join(chunks)
 
     @staticmethod
     def _to_text(raw: bytes, content_type: str) -> str:

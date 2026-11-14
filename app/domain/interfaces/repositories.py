@@ -24,6 +24,7 @@ from app.domain.source_snapshot import (
     SourceSnapshot,
 )
 from app.domain.value_objects import (
+    AnalysisExecutionStateVO,
     AnalysisJobStatusVO,
     DocumentFormatVO,
     DocumentStatusVO,
@@ -533,6 +534,32 @@ class IAnalysisJobRepository(ABC):
     @abstractmethod
     async def mark_processing_if_active(self, job_id: uuid.UUID) -> bool:
         """Атомарно перевести незавершённую задачу в PROCESSING; False, если она уже завершена."""
+        ...
+
+    @abstractmethod
+    async def lock_by_id(self, job_id: uuid.UUID) -> AnalysisJob | None:
+        """Задача под блокировкой строки в любом статусе; None, если её нет.
+
+        Отмена берёт ту же блокировку, что и запись результата: из двух терминальных
+        переходов выигрывает первый, второй видит уже новый статус.
+        """
+        ...
+
+    @abstractmethod
+    async def is_cancelled(self, job_id: uuid.UUID) -> bool: ...
+
+    @abstractmethod
+    async def pause_for_retry(self, job_id: uuid.UUID, state: AnalysisExecutionStateVO) -> bool:
+        """Записать состояние между попытками; False, если задача уже не в processing."""
+        ...
+
+    @abstractmethod
+    async def acknowledge_stop(self, job_id: uuid.UUID, state: AnalysisExecutionStateVO) -> bool:
+        """Подтвердить остановку отменённой задачи, если её ещё никто не подтвердил.
+
+        Условие на cancel_requested делает вызов идемпотентным: из нескольких доставок
+        одной задачи остановку записывает первая.
+        """
         ...
 
     @abstractmethod

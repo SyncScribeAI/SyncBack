@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.domain.value_objects import AnalysisJobStatusVO
+from app.domain.value_objects import AnalysisExecutionStateVO, AnalysisJobStatusVO
 
 
 class AnalysisJobCreateRequest(BaseModel):
@@ -118,6 +118,16 @@ class AnalysisJobResponse(BaseModel):
         default=None, validation_alias="incremental_view"
     )
     run_stats: AnalysisRunStats | None = Field(default=None, validation_alias="run_stats_view")
+    execution_state: AnalysisExecutionStateVO | None = Field(
+        default=None,
+        description=(
+            "Состояние вычисления. cancel_requested: отмена принята, воркер ещё не подтвердил "
+            "остановку; stopped: SyncBack ничего не выполняет; unknown: SyncBack прекратил "
+            "ожидание ML, но остановка вычисления в ML не подтверждена; None у старых задач"
+        ),
+    )
+    cancel_requested_at: datetime | None = None
+    execution_stopped_at: datetime | None = None
     model_config = {"from_attributes": True, "populate_by_name": True}
 
 

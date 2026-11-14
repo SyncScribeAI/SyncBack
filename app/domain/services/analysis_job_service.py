@@ -334,8 +334,16 @@ class AnalysisJobService:
         document_id: uuid.UUID,
         job_id: uuid.UUID,
     ) -> AnalysisJob:
+        """Зафиксировать отмену; остановку вычисления подтверждает воркер.
+
+        Строка задачи берётся под той же блокировкой, что и запись результата: иначе отмена,
+        прочитавшая processing, перезаписала бы уже сохранённый success.
+        """
         async with self._uow:
-            job = await self._get_job(project_id, document_id, job_id)
+            await self._get_job(project_id, document_id, job_id)
+            job = await self._uow.jobs.lock_by_id(job_id)
+            if job is None:
+                raise AnalysisJobNotFoundError(f"Задача {job_id} не найдена")
             if job.status == AnalysisJobStatusVO.CANCELLED:
                 return job
             if not AnalysisJobLifecycle.can_cancel(job.status):

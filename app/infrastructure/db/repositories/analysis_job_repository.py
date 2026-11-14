@@ -18,9 +18,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.analysis_reuse import AnalysisStrategy, Baseline, RunInput
 from app.domain.exceptions import AnalysisJobConflictError
 from app.domain.interfaces.repositories import IAnalysisJobRepository
-from app.domain.lifecycle import AnalysisJobLifecycle
+from app.domain.lifecycle import AnalysisExecutionLifecycle, AnalysisJobLifecycle
 from app.domain.pipeline_run import PipelineRunSummary
-from app.domain.value_objects import AnalysisJobStatusVO, KeysetPage, PaginationParams
+from app.domain.value_objects import (
+    AnalysisExecutionStateVO,
+    AnalysisJobStatusVO,
+    KeysetPage,
+    PaginationParams,
+)
 from app.infrastructure.db.models.analysis_job import AnalysisJob
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.enums import AnalysisJobStatus
@@ -181,6 +186,7 @@ class AnalysisJobRepository(IAnalysisJobRepository):
             .values(
                 status=AnalysisJobStatus.PROCESSING,
                 started_at=func.coalesce(AnalysisJob.started_at, datetime.now(UTC)),
+                execution_state=AnalysisExecutionStateVO.RUNNING.value,
             )
             .returning(AnalysisJob.id)
         )
@@ -196,6 +202,46 @@ class AnalysisJobRepository(IAnalysisJobRepository):
             .execution_options(populate_existing=True)
         )
         return result.scalar_one_or_none()
+
+    async def lock_by_id(self, job_id: uuid.UUID) -> AnalysisJob | None:
+        result = await self._session.execute(
+            select(AnalysisJob)
+            .where(AnalysisJob.id == job_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return result.scalar_one_or_none()
+
+    async def is_cancelled(self, job_id: uuid.UUID) -> bool:
+        status = await self._session.scalar(
+            select(AnalysisJob.status).where(AnalysisJob.id == job_id)
+        )
+        return status is AnalysisJobStatus.CANCELLED
+
+    async def pause_for_retry(self, job_id: uuid.UUID, state: AnalysisExecutionStateVO) -> bool:
+        result = await self._session.execute(
+            update(AnalysisJob)
+            .where(
+                AnalysisJob.id == job_id,
+                AnalysisJob.status == AnalysisJobStatus.PROCESSING,
+            )
+            .values(execution_state=state.value)
+            .returning(AnalysisJob.id)
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def acknowledge_stop(self, job_id: uuid.UUID, state: AnalysisExecutionStateVO) -> bool:
+        result = await self._session.execute(
+            update(AnalysisJob)
+            .where(
+                AnalysisJob.id == job_id,
+                AnalysisJob.status == AnalysisJobStatus.CANCELLED,
+                AnalysisJob.execution_state == AnalysisExecutionStateVO.CANCEL_REQUESTED.value,
+            )
+            .values(execution_state=state.value, execution_stopped_at=datetime.now(UTC))
+            .returning(AnalysisJob.id)
+        )
+        return result.scalar_one_or_none() is not None
 
     async def list_unqueued_before(self, cutoff: datetime, limit: int) -> list[uuid.UUID]:
         # Условие совпадает с частичным индексом ix_analysis_jobs_unqueued: запрос читает
@@ -298,10 +344,19 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> AnalysisJob:
+        now = datetime.now(UTC)
+        current_state = (
+            AnalysisExecutionStateVO(job.execution_state) if job.execution_state else None
+        )
+        state = AnalysisExecutionLifecycle.after_status(current_state, job.status, status)
+        job.execution_state = state.value
+        if status is AnalysisJobStatusVO.CANCELLED:
+            job.cancel_requested_at = now
+        if state in AnalysisExecutionLifecycle.STOPPED_STATES and job.execution_stopped_at is None:
+            job.execution_stopped_at = now
         job.status = _status_to_orm(status)
         job.error_code = error_code
         job.error_message = error_message
-        now = datetime.now(UTC)
         if status is AnalysisJobStatusVO.PROCESSING and job.started_at is None:
             job.started_at = now
         if AnalysisJobLifecycle.is_terminal(status):

@@ -20,7 +20,7 @@ import uuid
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from app.domain.value_objects import DocumentStatusVO, SuggestionStatusVO
+from app.domain.value_objects import DocumentFormatVO, DocumentStatusVO, SuggestionStatusVO
 
 
 @runtime_checkable
@@ -36,6 +36,18 @@ class DocumentProtocol(Protocol):
     status: DocumentStatusVO
     current_analysis_job_id: uuid.UUID | None
     review_version: int
+    # Экспорт пишет ключ готового файла через репозиторий, поэтому поле изменяемое.
+    exported_storage_key: str | None
+
+    # Экспорт читает исходный файл и формат, но не меняет их.
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def format(self) -> DocumentFormatVO: ...
+
+    @property
+    def storage_key(self) -> str: ...
 
 
 @runtime_checkable

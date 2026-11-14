@@ -93,11 +93,12 @@ async def _redis() -> AsyncIterator[Redis]:
 async def _get_cached_plain_text(job_id: uuid.UUID) -> str | None:
     try:
         async with _redis() as redis:
-            cached: str | None = await redis.get(f"{_PARSED_DOC_KEY_PREFIX}{job_id}")
-            return cached
+            cached = await redis.get(f"{_PARSED_DOC_KEY_PREFIX}{job_id}")
     except Exception:
         logger.warning("Redis недоступен, документ будет распарсен заново", exc_info=True)
         return None
+    # Клиент создан с decode_responses=True и отдаёт str, но тип redis-py этого не знает.
+    return cached if isinstance(cached, str) else None
 
 
 async def _cache_plain_text(job_id: uuid.UUID, plain_text: str) -> None:

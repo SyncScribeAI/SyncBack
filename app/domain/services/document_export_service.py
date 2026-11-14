@@ -11,18 +11,15 @@ uow.suggestions, а не через SuggestionService — иначе получ�
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
 
 from app.domain.document_geometry import rects_from_json
 from app.domain.exceptions import InvalidDocumentStatusError, UnsupportedExportFormatError
 from app.domain.interfaces.document_exporter import AppliedChange, DocumentExporterRegistry
+from app.domain.interfaces.entities import DocumentProtocol
 from app.domain.interfaces.file_storage import FileStorage, UploadContent
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.lifecycle import DocumentLifecycle
 from app.domain.value_objects import DocumentFormatVO, SuggestionStatusVO
-
-if TYPE_CHECKING:
-    from app.infrastructure.db.models.document import Document
 
 _MEDIA_TYPES: dict[DocumentFormatVO, str] = {
     DocumentFormatVO.DOCX: (
@@ -57,7 +54,7 @@ class DocumentExportService:
 
     async def export_document(
         self,
-        document: Document,
+        document: DocumentProtocol,
         target_format: DocumentFormatVO | None = None,
     ) -> tuple[bytes, str, str]:
         """Вернуть (bytes, filename, media_type) документа с принятыми правками.
@@ -80,7 +77,7 @@ class DocumentExportService:
         exported_bytes = await self._apply_accepted_changes(document)
         return exported_bytes, document.name, media_type_for(source_format)
 
-    async def export_and_save(self, document: Document) -> None:
+    async def export_and_save(self, document: DocumentProtocol) -> None:
         """Применить правки, сохранить результат в хранилище и записать exported_storage_key.
 
         Чтение правок и запись ключа идут в разных транзакциях: между ними
@@ -96,7 +93,7 @@ class DocumentExportService:
             await self._uow.documents.update_exported_key(document, export_key)
             await self._uow.commit()
 
-    async def _apply_accepted_changes(self, document: Document) -> bytes:
+    async def _apply_accepted_changes(self, document: DocumentProtocol) -> bytes:
         """Исходный файл из хранилища с применёнными принятыми правками.
 
         Файл скачивается вне UoW: I/O хранилища не должен держать транзакцию БД.
@@ -109,7 +106,7 @@ class DocumentExportService:
         exporter = self._exporters.get_exporter(DocumentFormatVO(document.format))
         return await asyncio.to_thread(exporter.apply_changes, raw_bytes, changes)
 
-    async def _iter_accepted_changes_pages(self, document: Document) -> list[AppliedChange]:
+    async def _iter_accepted_changes_pages(self, document: DocumentProtocol) -> list[AppliedChange]:
         """Курсорный обход принятых правок страницами по _EXPORT_PAGE_SIZE.
 
         ВАЖНО: метод НЕ открывает `async with self._uow`.

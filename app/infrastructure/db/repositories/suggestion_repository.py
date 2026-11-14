@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.baseline_result import BaselineSuggestion, evidence_refs
 from app.domain.exceptions import SuggestionAlreadyDecidedError
-from app.domain.interfaces.repositories import ISuggestionRepository
+from app.domain.interfaces.repositories import ISuggestionRepository, SuggestionT
 from app.domain.value_objects import (
     ReviewDecisions,
     SuggestionDecision,
@@ -431,8 +431,8 @@ class SuggestionRepository(ISuggestionRepository):
 
     async def reset_status(
         self,
-        suggestion: Suggestion,
-    ) -> Suggestion | None:
+        suggestion: SuggestionT,
+    ) -> SuggestionT | None:
         """Сбросить решение правки обратно в PENDING.
 
         Атомарный UPDATE ... WHERE status != 'pending' AND id = ?.

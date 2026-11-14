@@ -9,10 +9,11 @@ from __future__ import annotations
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict, TypeVar
 
 from app.domain.analysis_reuse import AnalysisStrategy, Baseline, RunInput
 from app.domain.baseline_result import BaselineFlag, BaselineSuggestion
+from app.domain.interfaces.entities import DocumentProtocol, SuggestionProtocol
 from app.domain.interfaces.user_repository import IUserRepository  # noqa: F401
 from app.domain.pipeline_run import PipelineRunSummary
 from app.domain.source_snapshot import (
@@ -40,6 +41,11 @@ if TYPE_CHECKING:
     from app.infrastructure.db.models.project import Project
     from app.infrastructure.db.models.source import Source
     from app.infrastructure.db.models.suggestion import Suggestion
+
+# Сервисы домена держат документ и правку как протоколы, а вызывающие из инфраструктуры
+# как ORM-объекты. Метод возвращает тот же объект, поэтому тип сохраняется у обоих.
+DocumentT = TypeVar("DocumentT", bound=DocumentProtocol)
+SuggestionT = TypeVar("SuggestionT", bound=SuggestionProtocol)
 
 
 class DocumentRow(TypedDict):
@@ -100,7 +106,7 @@ class IDocumentRepository(ABC):
     async def get_many_by_ids(self, document_ids: list[uuid.UUID]) -> list[Document]: ...
 
     @abstractmethod
-    async def update_status(self, document: Document, status: DocumentStatusVO) -> Document: ...
+    async def update_status(self, document: DocumentT, status: DocumentStatusVO) -> DocumentT: ...
 
     @abstractmethod
     async def compare_and_set_status(
@@ -123,7 +129,7 @@ class IDocumentRepository(ABC):
         ...
 
     @abstractmethod
-    async def update_exported_key(self, document: Document, export_key: str) -> None: ...
+    async def update_exported_key(self, document: DocumentProtocol, export_key: str) -> None: ...
 
     @abstractmethod
     async def compare_and_increment_review_version(
@@ -464,8 +470,8 @@ class ISuggestionRepository(ABC):
     @abstractmethod
     async def reset_status(
         self,
-        suggestion: Suggestion,
-    ) -> Suggestion | None:
+        suggestion: SuggestionT,
+    ) -> SuggestionT | None:
         """Сбросить решение правки обратно в PENDING.
 
         Атомарный UPDATE WHERE status != PENDING AND id = ?.

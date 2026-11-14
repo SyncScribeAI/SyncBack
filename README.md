@@ -529,7 +529,7 @@ Unit- и контрактные тесты работают без внешни�
 
 CI (`.github/workflows/ci.yml`) на каждый push и pull request:
 
-- `lint-and-test` — ruff, проверки границ слоёв, mypy (пока не блокирует merge), unit- и контрактные тесты с порогом покрытия 70%;
+- `lint-and-test`: ruff, проверки границ слоёв, mypy, unit- и контрактные тесты с порогом покрытия 70%;
 - `check-migrations` — одна голова Alembic, `upgrade head` на чистой базе, сверка схемы с моделями (`alembic check`), откат до нуля и повторное применение;
 - `integration-tests` — интеграционные тесты на PostgreSQL, Redis и SeaweedFS;
 - `build-images` — сборка образов API и воркера.

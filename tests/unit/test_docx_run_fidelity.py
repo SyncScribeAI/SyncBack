@@ -5,13 +5,16 @@ from __future__ import annotations
 import io
 import zipfile
 
+import pytest
 from docx import Document as DocxDocument
 from docx.oxml import parse_xml
 from docx.oxml.ns import nsdecls, qn
 from docx.text.paragraph import Paragraph
 
+from app.domain.exceptions import DocumentExportIntegrityError
 from app.domain.interfaces.document_exporter import AppliedChange
 from app.infrastructure.exporters.docx_exporter import DocxExporter
+from app.infrastructure.exporters.docx_runs import rewrite_paragraph
 from app.infrastructure.parsers.docx_parser import DocxParser
 
 
@@ -201,14 +204,104 @@ def test_edit_in_field_result_is_not_applied() -> None:
     assert "правка в результате поля" in report.reasons
 
 
-def test_edit_over_tab_falls_back_to_rewrite() -> None:
+def test_edit_over_tab_keeps_run_formatting() -> None:
     document = DocxDocument()
     paragraph = document.add_paragraph()
     paragraph.add_run("Имя\tЗначение").bold = True
     raw = _save(document)
     result, _, report = _export(raw, [_change(raw, "Имя\tЗнач", "Ключ\tЗнач")])
     assert result.paragraphs[0].text == "Ключ\tЗначение"
-    assert (report.in_runs, report.rewritten, report.verified) == (0, 1, True)
+    assert all(run.bold for run in result.paragraphs[0].runs)
+    assert (report.in_runs, report.rewritten, report.verified) == (1, 0, True)
+
+
+def _tab_and_hyperlink_document(separator_xml: str) -> bytes:
+    """Случай из ревью: табуляция или перенос и гиперссылка в одном абзаце."""
+    document = DocxDocument()
+    paragraph = document.add_paragraph()
+    paragraph._p.append(
+        parse_xml(f"<w:r {nsdecls('w')}><w:t>Имя</w:t>{separator_xml}<w:t>Значение </w:t></w:r>")
+    )
+    paragraph._p.append(
+        parse_xml(
+            f'<w:hyperlink {nsdecls("w", "r")} r:id="rId99">'
+            '<w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t>ссылка</w:t></w:r>'
+            "</w:hyperlink>"
+        )
+    )
+    paragraph.add_run(" конец.")
+    return _save(document)
+
+
+def test_edit_over_tab_next_to_hyperlink_does_not_duplicate_link() -> None:
+    raw = _tab_and_hyperlink_document("<w:tab/>")
+    result, output, report = _export(raw, [_change(raw, "Имя\tЗнач", "Ключ\tЗнач")])
+    assert result.paragraphs[0].text == "Ключ\tЗначение ссылка конец."
+    xml = zipfile.ZipFile(io.BytesIO(output)).read("word/document.xml")
+    assert xml.count("ссылка".encode()) == 1
+    assert b"rId99" in xml
+    assert (report.in_runs, report.rewritten, report.verified) == (1, 0, True)
+
+
+def test_edit_over_line_break_next_to_hyperlink_does_not_duplicate_link() -> None:
+    raw = _tab_and_hyperlink_document("<w:br/>")
+    result, output, report = _export(raw, [_change(raw, "Имя\nЗнач", "Ключ\nЗнач")])
+    assert result.paragraphs[0].text == "Ключ\nЗначение ссылка конец."
+    xml = zipfile.ZipFile(io.BytesIO(output)).read("word/document.xml")
+    assert xml.count("ссылка".encode()) == 1
+    assert report.verified is True
+
+
+def test_replacement_with_tab_and_newline_becomes_elements() -> None:
+    raw = _styled_document()
+    result, output, report = _export(raw, [_change(raw, "10 рабочих", "5\tрабочих\nдней")])
+    paragraph = result.paragraphs[1]
+    assert paragraph.text == "Срок ответа 5\tрабочих\nдней дней, курсив в конце."
+    assert paragraph.runs[1].bold is True
+    xml = zipfile.ZipFile(io.BytesIO(output)).read("word/document.xml")
+    assert b"<w:tab/>" in xml
+    assert report.verified is True
+
+
+def test_page_break_next_to_edit_is_kept() -> None:
+    document = DocxDocument()
+    paragraph = document.add_paragraph()
+    paragraph._p.append(
+        parse_xml(
+            f'<w:r {nsdecls("w")}><w:t>Срок 10</w:t><w:br w:type="page"/><w:t>дней</w:t></w:r>'
+        )
+    )
+    raw = _save(document)
+    result, _, report = _export(raw, [_change(raw, "10", "5")])
+    assert result.paragraphs[0].text == "Срок 5дней"
+    breaks = result.paragraphs[0]._p.findall(f"{qn('w:r')}/{qn('w:br')}")
+    assert [b.get(qn("w:type")) for b in breaks] == ["page"]
+    assert report.verified is True
+
+
+def test_failed_verification_raises_integrity_error(monkeypatch) -> None:
+    raw = _styled_document()
+    exporter = DocxExporter()
+    original = exporter.apply_changes_with_report
+
+    def broken(raw_bytes, changes):
+        output, report = original(raw_bytes, changes)
+        report.verified = False
+        return output, report
+
+    monkeypatch.setattr(exporter, "apply_changes_with_report", broken)
+    with pytest.raises(DocumentExportIntegrityError):
+        exporter.apply_changes(raw, [_change(raw, "10", "5")])
+
+
+def test_change_without_place_in_file_still_exports() -> None:
+    """Правку без места в файле пользователь не видит, исходный текст на её месте верен."""
+    raw = _styled_document()
+    change = AppliedChange(
+        section_ref="", change_type="modify", old_text="нет в тексте", new_text="x"
+    )
+    output = DocxExporter().apply_changes(raw, [_change(raw, "10", "5"), change])
+    assert "Срок ответа 5 рабочих" in DocxDocument(io.BytesIO(output)).paragraphs[1].text
 
 
 def test_unanchored_change_goes_through_same_run_replacement() -> None:
@@ -271,3 +364,12 @@ def test_tracked_insertion_is_outside_text_and_kept() -> None:
     assert result.paragraphs[0].text == "Срок 5 дней"
     assert result.paragraphs[0]._p.find(qn("w:ins")) is not None
     assert report.verified is True
+
+
+def test_rewrite_paragraph_clears_hyperlink_runs() -> None:
+    """Запасной путь переписывает абзац целиком, текст ссылки не повторяется."""
+    raw = _tab_and_hyperlink_document("<w:tab/>")
+    paragraph = DocxDocument(io.BytesIO(raw)).paragraphs[0]
+    rewrite_paragraph(paragraph, "Ключ\tЗначение ссылка конец.")
+    assert paragraph.text == "Ключ\tЗначение ссылка конец."
+    assert paragraph._p.find(qn("w:hyperlink")) is None

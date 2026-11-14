@@ -2,9 +2,10 @@
 
 Абзац раскладывается на атомы в том же порядке, в каком python-docx собирает
 paragraph.text: раны абзаца и раны гиперссылок, внутри рана элементы w:t, w:tab, w:br,
-w:cr, w:noBreakHyphen и w:ptab. Править можно только w:t: текст замены пишется в первый
-затронутый атом и получает его оформление, покрытый текст следующих атомов удаляется,
-остальные элементы рана остаются на месте.
+w:cr, w:noBreakHyphen и w:ptab. Текст замены пишется в первый затронутый атом и получает
+оформление его рана, покрытые атомы следующих ранов удаляются, остальные элементы ранов
+остаются на месте. Табуляция и перенос строки в замене становятся w:tab и w:br: только
+так повторный разбор файла даёт тот же текст, что и правка.
 
 Правки заданы в нормализованном тексте абзаца (normalize_text). Замена неразрывного
 пробела обычным длину не меняет, и смещения совпадают; NFC и удаление ZWSP меняют, и для
@@ -21,11 +22,12 @@ from __future__ import annotations
 import copy
 import unicodedata
 from bisect import bisect_left, bisect_right
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 
@@ -37,6 +39,8 @@ _TEXT_TAGS = frozenset(
 )
 _W_T = qn("w:t")
 _W_RPR = qn("w:rPr")
+_W_R = qn("w:r")
+_W_HYPERLINK = qn("w:hyperlink")
 _FLD_CHAR = qn("w:fldChar")
 _FLD_CHAR_TYPE = qn("w:fldCharType")
 _XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
@@ -136,14 +140,19 @@ def paragraph_atoms(paragraph: Paragraph) -> list[_Atom]:
 
 
 def _touched(atoms: Sequence[_Atom], edit: TextEdit) -> list[_Atom]:
-    return [a for a in atoms if a.norm_start < edit.end and a.norm_end > edit.start]
+    # Атом без текста (разрыв страницы, пустой w:t) правкой не покрывается и остаётся.
+    return [
+        a
+        for a in atoms
+        if a.norm_start < a.norm_end and a.norm_start < edit.end and a.norm_end > edit.start
+    ]
 
 
 def classify(atoms: Sequence[_Atom], edit: TextEdit) -> EditOutcome:
     touched = _touched(atoms, edit)
     if any(atom.in_field for atom in touched):
         return EditOutcome.FIELD
-    if not touched or not all(atom.editable for atom in touched):
+    if not touched:
         return EditOutcome.REWRITE
     return EditOutcome.IN_RUNS
 
@@ -151,54 +160,148 @@ def classify(atoms: Sequence[_Atom], edit: TextEdit) -> EditOutcome:
 def apply_in_runs(atoms: Sequence[_Atom], edits: Sequence[TextEdit]) -> None:
     """Правки без пересечений применяются справа налево: смещения левых правок не сдвигаются.
 
-    Перед вызовом каждая правка проверена classify и затрагивает только w:t вне полей.
+    Перед вызовом каждая правка проверена classify и затрагивает только атомы вне полей.
     """
+    runs: dict[int, Any] = {}
     for edit in sorted(edits, key=lambda e: e.start, reverse=True):
         touched = _touched(atoms, edit)
-        first, last = touched[0], touched[-1]
-        raw_start = first.to_raw(edit.start - first.norm_start, ceil=False)
-        raw_end = last.to_raw(edit.end - last.norm_start, ceil=True)
-        replacement = edit.replacement or ""
-        if first is last:
-            first.raw = first.raw[:raw_start] + replacement + first.raw[raw_end:]
-        else:
-            first.raw = first.raw[:raw_start] + replacement
-            for atom in touched[1:-1]:
-                atom.raw = ""
-            last.raw = last.raw[raw_end:]
         for atom in touched:
-            atom.changed = True
+            runs[id(atom.run)] = atom.run
+        replacement = edit.replacement or ""
+        if all(atom.editable for atom in touched) and not _has_structure(replacement):
+            _replace_text(touched, edit, replacement)
+        else:
+            _replace_structured(touched, edit, replacement)
     _write_back(atoms)
+    _drop_empty_runs(runs.values())
+
+
+def _has_structure(text: str) -> bool:
+    return "\t" in text or "\n" in text
+
+
+def _replace_text(touched: Sequence[_Atom], edit: TextEdit, replacement: str) -> None:
+    first, last = touched[0], touched[-1]
+    raw_start = first.to_raw(edit.start - first.norm_start, ceil=False)
+    raw_end = last.to_raw(edit.end - last.norm_start, ceil=True)
+    if first is last:
+        first.raw = first.raw[:raw_start] + replacement + first.raw[raw_end:]
+    else:
+        first.raw = first.raw[:raw_start] + replacement
+        for atom in touched[1:-1]:
+            atom.raw = ""
+        last.raw = last.raw[raw_end:]
+    for atom in touched:
+        atom.changed = True
+
+
+def _replace_structured(touched: Sequence[_Atom], edit: TextEdit, replacement: str) -> None:
+    """Замена, задевающая w:tab и w:br или содержащая их, перестраивает элементы рана.
+
+    Новые элементы встают на место первого атома в его ране. Его остаток слева правки
+    становится новым атомом: левая правка того же атома допишет его через _write_back.
+    """
+    first, last = touched[0], touched[-1]
+    prefix = first.raw[: first.to_raw(edit.start - first.norm_start, ceil=False)]
+    suffix = last.raw[last.to_raw(edit.end - last.norm_start, ceil=True) :]
+    if not first.editable:
+        prefix = ""
+    if not last.editable:
+        suffix = ""
+    prefix_element = _text_element(prefix) if prefix else None
+    elements = [] if prefix_element is None else [prefix_element]
+    elements.extend(_structured_elements(replacement))
+    if first is last and suffix:
+        elements.append(_text_element(suffix))
+    for element in elements:
+        first.element.addprevious(element)
+    first.element.getparent().remove(first.element)
+    for atom in touched[1:]:
+        if atom is last and suffix:
+            atom.raw = suffix
+            atom.changed = True
+            continue
+        atom.element.getparent().remove(atom.element)
+        atom.raw = ""
+    if prefix_element is not None:
+        first.element = prefix_element
+        first.raw = prefix
+        first.editable = True
+    first.changed = False
+
+
+def _structured_elements(text: str) -> list[Any]:
+    elements: list[Any] = []
+    buffer: list[str] = []
+    for char in text:
+        if char not in "\t\n":
+            buffer.append(char)
+            continue
+        if buffer:
+            elements.append(_text_element("".join(buffer)))
+            buffer.clear()
+        elements.append(OxmlElement("w:tab" if char == "\t" else "w:br"))
+    if buffer:
+        elements.append(_text_element("".join(buffer)))
+    return elements
+
+
+def _text_element(text: str) -> Any:
+    element = OxmlElement("w:t")
+    element.text = text
+    element.set(_XML_SPACE, "preserve")
+    return element
 
 
 def _write_back(atoms: Sequence[_Atom]) -> None:
-    runs: dict[int, Any] = {}
     for atom in atoms:
         if not atom.changed:
             continue
         if atom.raw:
             atom.element.text = atom.raw
             atom.element.set(_XML_SPACE, "preserve")
-        else:
+        elif atom.element.getparent() is not None:
             atom.element.getparent().remove(atom.element)
-        runs[id(atom.run)] = atom.run
-    # Ран, от которого осталось только оформление, удаляется: пустой ран Word хранит зря.
-    for run in runs.values():
-        if all(child.tag == _W_RPR for child in run):
-            parent = run.getparent()
-            if parent is not None:
-                parent.remove(run)
+
+
+def _drop_empty_runs(runs: Iterable[Any]) -> None:
+    """Ран без содержимого, кроме оформления, Word хранит зря; пустая гиперссылка тоже."""
+    for run in runs:
+        if not all(child.tag == _W_RPR for child in run):
+            continue
+        parent = run.getparent()
+        if parent is None:
+            continue
+        parent.remove(run)
+        if parent.tag == _W_HYPERLINK and parent.find(_W_R) is None:
+            parent.getparent().remove(parent)
 
 
 def rewrite_paragraph(paragraph: Paragraph, new_text: str) -> None:
-    """Запасной путь: абзац переписывается одним раном с оформлением первого рана."""
-    runs = paragraph.runs
-    for run in runs:
-        run.text = ""
-    if runs:
-        runs[0].text = new_text
-    else:
+    """Запасной путь: абзац переписывается одним раном с оформлением первого рана.
+
+    Очищаются и раны гиперссылок: python-docx включает их текст в paragraph.text, и
+    оставленный текст ссылки повторился бы после нового текста абзаца.
+    """
+    runs = paragraph._p.xpath("w:r | w:hyperlink/w:r")
+    for run in runs[1:]:
+        parent = run.getparent()
+        parent.remove(run)
+        if parent.tag == _W_HYPERLINK and parent.find(_W_R) is None:
+            parent.getparent().remove(parent)
+    if not runs:
         paragraph.add_run(new_text)
+        return
+    first = runs[0]
+    for child in list(first):
+        if child.tag != _W_RPR:
+            first.remove(child)
+    if first.getparent().tag == _W_HYPERLINK:
+        hyperlink = first.getparent()
+        hyperlink.addprevious(first)
+        hyperlink.getparent().remove(hyperlink)
+    for element in _structured_elements(new_text):
+        first.append(element)
 
 
 def _is_heading(paragraph: Paragraph) -> bool:

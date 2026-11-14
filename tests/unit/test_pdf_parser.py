@@ -24,7 +24,7 @@ from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 from app.infrastructure.parsers.pdf_blocks import PDF_RECTS_LOCATOR, build_layout
 from app.infrastructure.parsers.pdf_lines import PdfLine, PdfPageLines
 from app.infrastructure.parsers.pdf_parser import PdfiumGeometry, PdfParser
-from app.infrastructure.parsers.source_file_inspector import ParserSourceFileInspector
+from app.infrastructure.parsers.upload_file_inspector import ParserUploadFileInspector
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "pdf"
 
@@ -162,7 +162,9 @@ def test_runs_point_to_the_same_characters(name: str) -> None:
 def test_geometry_locates_word_on_its_page() -> None:
     raw = _raw("table_page_break.pdf")
     geometry = PdfiumGeometry(PdfParser())
-    document, runs = geometry.parse_with_runs(raw)
+    layout = geometry.parse_layout(raw)
+    document, runs = layout.document, layout.runs
+    assert runs is not None
     first = document.plain_text.index("timeout 1 ")
     last = document.plain_text.index("timeout 59")
     rects = geometry.locate(raw, runs, [(first, first + 9), (last, last + 10), (0, 0)])
@@ -214,7 +216,7 @@ def test_registry_dispatches_pdf_and_geometry() -> None:
 
 
 async def test_inspector_reports_pages_without_text_and_rewinds() -> None:
-    inspector = ParserSourceFileInspector(pdf_max_pages=10)
+    inspector = ParserUploadFileInspector(pdf_max_pages=10)
     content = UploadContent.from_bytes(_raw("text_then_image.pdf"), "application/pdf")
     report = await inspector.inspect("mixed.pdf", content)
     assert report.pages_without_text == (2,)
@@ -313,7 +315,7 @@ def test_list_item_continuation_is_indented() -> None:
 def test_inspector_reads_stream_without_copy() -> None:
     stream = io.BytesIO(_raw("table.pdf"))
     stream.seek(5)
-    report = ParserSourceFileInspector(pdf_max_pages=10)._inspect_pdf(stream)
+    report = ParserUploadFileInspector(pdf_max_pages=10)._inspect_pdf(stream)
     assert report.pages_without_text == ()
 
 

@@ -15,6 +15,7 @@ from app.api.schemas.document import (
     DocumentResponse,
     DocumentSectionResponse,
     document_response,
+    uploaded_document_response,
 )
 from app.api.schemas.pagination import Page
 from app.api.schemas.source import SourceResponse
@@ -34,6 +35,7 @@ from app.domain.exceptions import (
     InvalidDocumentStatusError,
     SourceLockError,
     SourceNotFoundError,
+    UnreadablePdfError,
     UnsupportedExportFormatError,
     UnsupportedFileFormatError,
 )
@@ -89,7 +91,14 @@ async def upload_document(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)
         ) from exc
     try:
-        document = await document_service.upload_document(project.id, file.filename, content)
+        document, report = await document_service.upload_document(
+            project.id, file.filename, content
+        )
+    # Формат известен, но файл непригоден (скан, пароль, сломан): это 422, а не 415.
+    except (UnreadablePdfError, DocumentParseError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
     except UnsupportedFileFormatError as exc:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc)
@@ -98,7 +107,7 @@ async def upload_document(
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)
         ) from exc
-    return DocumentResponse.model_validate(document)
+    return uploaded_document_response(document, report)
 
 
 @router.get("", response_model=Page[DocumentResponse])
@@ -180,7 +189,7 @@ async def get_document_content(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     try:
         parsed = await document_service.get_document_content(document)
-    except DocumentParseError as exc:
+    except (DocumentParseError, UnreadablePdfError) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Не удалось распарсить документ: {exc}",

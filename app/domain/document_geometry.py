@@ -9,6 +9,8 @@ from bisect import bisect_right
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
+from app.domain.interfaces.document_parser import ParsedDocument
+
 
 @dataclass(frozen=True, slots=True)
 class PageRect:
@@ -66,3 +68,46 @@ class TextRuns:
             if lo < hi:
                 yield self.pages[i], self.char_indexes[i] + lo - run_start, hi - lo
             i += 1
+
+
+@dataclass(frozen=True, slots=True)
+class PageSize:
+    """Размер страницы в точках так, как её показывает просмотрщик: с CropBox и поворотом.
+
+    Нужен клиенту, чтобы разметить страницы до отрисовки и не прыгать при прокрутке.
+    """
+
+    number: int
+    width: float
+    height: float
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentLayout:
+    """Разбор документа вместе с положением текста на страницах.
+
+    runs и pages есть только у форматов с фиксированной вёрсткой; у остальных это
+    обычный ParsedDocument.
+    """
+
+    document: ParsedDocument
+    runs: TextRuns | None = None
+    pages: tuple[PageSize, ...] = ()
+
+
+def highlight_span(start: int, end: int) -> tuple[int, int]:
+    """Диапазон текста, который подсвечивается на странице.
+
+    У вставки диапазон пустой, а на странице нужен ориентир: берётся символ перед точкой
+    вставки, справа от него встанет знак вставки.
+    """
+    if end > start:
+        return start, end
+    return (start - 1, start) if start > 0 else (0, 1)
+
+
+def rects_to_json(rects: tuple[PageRect, ...]) -> dict[str, list[list[float]]] | None:
+    """Формат поля geometry правок и флагов; координаты округляются до 0.1 пт."""
+    if not rects:
+        return None
+    return {"rects": [[r.page, *(round(v, 1) for v in (r.x0, r.y0, r.x1, r.y1))] for r in rects]}

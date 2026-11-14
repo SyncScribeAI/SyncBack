@@ -1,6 +1,5 @@
 """Какие файлы принимаются источником и что о файле сообщается при загрузке."""
 
-from dataclasses import dataclass
 from pathlib import PurePath
 
 from app.domain.exceptions import UnsupportedFormatError
@@ -18,14 +17,3 @@ def ensure_source_extension(filename: str) -> None:
         raise UnsupportedFormatError(
             f"Файл {shown} нельзя загрузить источником. Поддерживаются {allowed}"
         )
-
-
-@dataclass(frozen=True, slots=True)
-class SourceFileReport:
-    """Итог проверки файла при загрузке.
-
-    pages_without_text: страницы PDF без текстового слоя (с единицы). Файл принят, но
-    текст этих страниц в анализ не попадёт, поэтому пользователь видит их номера сразу.
-    """
-
-    pages_without_text: tuple[int, ...] = ()

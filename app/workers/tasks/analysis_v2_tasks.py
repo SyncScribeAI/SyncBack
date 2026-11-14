@@ -48,6 +48,7 @@ from celery import Task
 from celery.exceptions import SoftTimeLimitExceeded
 
 from app.core.config import get_settings
+from app.domain.document_geometry import highlight_span
 from app.domain.evidence import EvidenceSource, evidence_sources_of
 from app.domain.exceptions import (
     LLMInputTooLargeError,
@@ -81,7 +82,7 @@ from app.domain.source_snapshot import (
     pack_fingerprints,
 )
 from app.domain.source_text import SourceLayout, ensure_source_fits
-from app.domain.value_objects import AnalysisJobStatusVO
+from app.domain.value_objects import AnalysisJobStatusVO, DocumentFormatVO
 from app.infrastructure.db.session import isolated_uow
 from app.infrastructure.ml_pipeline.factory import analysis_limits, get_document_analyzer
 from app.infrastructure.ml_pipeline.schemas import CONTRACT_VERSION, encode_request
@@ -93,7 +94,7 @@ from app.workers.tasks.runtime import (
     build_source_ref,
     event_publisher,
     get_connector_for,
-    get_parser_registry,
+    get_document_layout_reader,
     get_storage,
 )
 
@@ -234,6 +235,8 @@ async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
     )
     run = replace(run, evidence=counters.as_meta())
     logger.info("Анализ v2: основания правок", extra={"job_id": str(job.id), **counters.as_meta()})
+    if job.document_format == DocumentFormatVO.PDF.value:
+        drafts, flags = await _attach_geometry(job, drafts, flags)
     await finish(
         job.id,
         outcome.status,
@@ -331,7 +334,7 @@ async def _load_document(job: _StartedJob) -> DocumentInput:
     """Блоки строятся из файла на каждую попытку: одна задача на документ, разбор — один."""
     try:
         raw = await get_storage().download(job.storage_key)
-        parsed = get_parser_registry().parse_by_filename(job.storage_key, raw)
+        parsed = (await get_document_layout_reader().read(job.storage_key, raw)).document
     except SoftTimeLimitExceeded:
         raise
     except Exception as exc:
@@ -344,6 +347,45 @@ async def _load_document(job: _StartedJob) -> DocumentInput:
         format=job.document_format,
         plain_text=parsed.plain_text,
         blocks=parsed.blocks,
+    )
+
+
+async def _attach_geometry(
+    job: _StartedJob, drafts: list[SuggestionDraft], flags: list[FlagDraft]
+) -> tuple[list[SuggestionDraft], list[FlagDraft]]:
+    """Прямоугольники правок и флагов на страницах PDF.
+
+    Считаются до записи результата, а не внутри неё: поиск открывает страницы PDF, и
+    держать на это время блокировку строки задачи незачем. Файл скачивается заново, а не
+    хранится с разбора: во время вызова конвейера он занимал бы память воркера. Разбор
+    берётся из кэша. Сбой геометрии не роняет анализ: правки видны в тексте, без
+    подсветки на странице.
+    """
+    if not drafts and not flags:
+        return drafts, flags
+    reader = get_document_layout_reader()
+    try:
+        raw = await get_storage().download(job.storage_key)
+        layout = await reader.read(job.storage_key, raw)
+        blocks = {b.ref: (b.start_offset, b.end_offset) for b in layout.document.blocks}
+        spans = [highlight_span(d.start_offset, d.end_offset) for d in drafts]
+        spans += [blocks.get(f.block_ref, (0, 0)) for f in flags]
+        rects = await reader.locate(job.storage_key, raw, layout, spans)
+    except SoftTimeLimitExceeded:
+        raise
+    except Exception:
+        logger.warning(
+            "Анализ v2: не удалось найти правки на страницах PDF",
+            exc_info=True,
+            extra={"job_id": str(job.id)},
+        )
+        return drafts, flags
+    if rects is None:
+        return drafts, flags
+    split = len(drafts)
+    return (
+        [replace(d, geometry=r) for d, r in zip(drafts, rects[:split], strict=True)],
+        [replace(f, geometry=r) for f, r in zip(flags, rects[split:], strict=True)],
     )
 
 

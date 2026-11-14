@@ -11,9 +11,10 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.api.schemas.source import SourceBadge, SourceResponse
+from app.domain.interfaces.upload_file_inspector import UploadFileReport
 
 # ---------------------------------------------------------------------------
 # Техническое состояние анализа (не путать с публичным статусом документа)
@@ -128,7 +129,21 @@ class DocumentResponse(BaseModel):
     review_version: int = 0
     # Техническое состояние последнего analysis job (null — анализ не запускался)
     analysis: AnalysisStateResponse | None = None
+    pages_without_text: list[int] | None = Field(
+        default=None,
+        description=(
+            "Только в ответе на загрузку PDF: страницы без текстового слоя (с единицы). "
+            "Документ принят, но текст этих страниц в анализ и редактор не попадёт"
+        ),
+    )
     model_config = {"from_attributes": True}
+
+
+def uploaded_document_response(document: Any, report: UploadFileReport) -> DocumentResponse:
+    response = DocumentResponse.model_validate(document)
+    if report.pages_without_text:
+        response.pages_without_text = list(report.pages_without_text)
+    return response
 
 
 def document_response(document: Any, latest_job: Any = None) -> DocumentResponse:

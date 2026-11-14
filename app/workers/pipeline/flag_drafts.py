@@ -11,6 +11,7 @@ import uuid
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from app.domain.document_geometry import rects_to_json
 from app.domain.evidence import EvidenceSource, evidence_to_json
 from app.domain.services.analysis_result_mapper import FlagDraft
 from app.infrastructure.db.models.analysis_flag import AnalysisFlag
@@ -35,6 +36,7 @@ def to_flags(
             rationale=draft.rationale,
             quotes=_quotes(draft, rows),
             position=draft.position,
+            geometry=rects_to_json(draft.geometry),
         )
         for draft in drafts
     ]

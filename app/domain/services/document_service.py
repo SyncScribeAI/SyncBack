@@ -6,26 +6,30 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from app.domain.document_geometry import DocumentLayout
 from app.domain.exceptions import (
     DocumentNotFoundError,
     FileTooLargeError,
     InvalidDocumentStatusError,
     UnsupportedFileFormatError,
 )
+from app.domain.interfaces.document_layout import DocumentLayoutReader
 from app.domain.interfaces.document_parser import IDocumentParserRegistry, ParsedDocument
 from app.domain.interfaces.file_storage import FileStorage, UploadContent
 from app.domain.interfaces.repositories import DocumentRow
 from app.domain.interfaces.unit_of_work import IUnitOfWork
+from app.domain.interfaces.upload_file_inspector import UploadFileInspector, UploadFileReport
 from app.domain.lifecycle import DocumentLifecycle
 from app.domain.policies import UploadLimits
 from app.domain.source_snapshot import fingerprints_storage_key
-from app.domain.storage_keys import document_storage_key
+from app.domain.storage_keys import derived_document_keys, document_storage_key
 from app.domain.value_objects import (
     DocumentFormatVO,
     DocumentStatusVO,
@@ -46,6 +50,7 @@ FORMAT_BY_EXTENSION: dict[str, DocumentFormatVO] = {
     ".txt": DocumentFormatVO.TXT,
     ".md": DocumentFormatVO.MARKDOWN,
     ".markdown": DocumentFormatVO.MARKDOWN,
+    ".pdf": DocumentFormatVO.PDF,
 }
 
 
@@ -54,14 +59,14 @@ def _extension_to_format(suffix: str) -> DocumentFormatVO:
     if fmt is None:
         raise UnsupportedFileFormatError(
             f"Формат '{suffix or 'без расширения'}' не поддерживается. "
-            "Допустимые форматы: docx, txt, md"
+            "Допустимые форматы: docx, txt, md, pdf"
         )
     return fmt
 
 
 def _document_storage_keys(*keys: str | None) -> list[str]:
-    """Ключи файлов документа без пустых значений и дубликатов, в исходном порядке."""
-    return list(dict.fromkeys(key for key in keys if key))
+    """Ключи файлов документа и производных от них объектов без пустых значений и дубликатов."""
+    return list(dict.fromkeys(k for key in keys if key for k in (key, *derived_document_keys(key))))
 
 
 class DocumentService:
@@ -72,12 +77,16 @@ class DocumentService:
         parser_registry: IDocumentParserRegistry,
         upload_limits: UploadLimits,
         download_url_ttl_seconds: int,
+        file_inspector: UploadFileInspector | None = None,
+        layout_reader: DocumentLayoutReader | None = None,
     ):
         self._uow = uow
         self._storage = file_storage
         self._parser_registry = parser_registry
         self._upload_limits = upload_limits
         self._download_url_ttl_seconds = download_url_ttl_seconds
+        self._file_inspector = file_inspector
+        self._layout_reader = layout_reader
 
     # ------------------------------------------------------------------
     # Upload
@@ -91,11 +100,18 @@ class DocumentService:
         project_id: uuid.UUID,
         filename: str,
         content: UploadContent,
-    ) -> Document:
-        """Загрузить документ в хранилище и создать запись в БД."""
+    ) -> tuple[Document, UploadFileReport]:
+        """Загрузить документ в хранилище и создать запись в БД.
+
+        Файл проверяется до записи: PDF без текстового слоя отклоняется сразу, а не при
+        первом открытии в редакторе, и не оставляет в хранилище ничего.
+        """
         if self._upload_limits.exceeded_by(content.size):
             raise FileTooLargeError(f"Файл превышает лимит {self._upload_limits.max_size_mb} МБ")
         document_format = self._resolve_format(filename)
+        report = UploadFileReport()
+        if self._file_inspector is not None:
+            report = await self._file_inspector.inspect(filename, content)
         document_id = uuid.uuid4()
         storage_key = document_storage_key(project_id, document_id, filename)
         await self._storage.upload(storage_key, content)
@@ -114,7 +130,7 @@ class DocumentService:
         except Exception:
             await self._storage.delete(storage_key)
             raise
-        return saved
+        return saved, report
 
     # ------------------------------------------------------------------
     # Queries
@@ -325,12 +341,39 @@ class DocumentService:
         return await self._storage.download(original_key or document.storage_key)
 
     async def get_document_content(self, document: Document) -> ParsedDocument:
-        raw_bytes = await self._storage.download(document.storage_key)
-        return self._parser_registry.parse_by_filename(document.storage_key, raw_bytes)
+        return (await self.get_document_layout(document)).document
+
+    async def get_document_layout(self, document: Document) -> DocumentLayout:
+        """Разбор вместе с размерами страниц; у PDF берётся из кэша рядом с файлом."""
+        return await self._read_layout(document.storage_key)
+
+    async def get_editor_layouts(
+        self, document: Document, *, with_original: bool
+    ) -> tuple[DocumentLayout, DocumentLayout | None]:
+        """Текущий разбор и разбор оригинала для редактора.
+
+        Пока оригинал лежит под тем же ключом, разбор один: два параллельных чтения PDF
+        без кэша разбирали бы один файл дважды.
+        """
+        current = document.storage_key
+        original = getattr(document, "original_storage_key", None) or current
+        if not with_original:
+            return await self._read_layout(current), None
+        if original == current:
+            layout = await self._read_layout(current)
+            return layout, layout
+        current_layout, original_layout = await asyncio.gather(
+            self._read_layout(current), self._read_layout(original)
+        )
+        return current_layout, original_layout
 
     async def get_original_content(self, document: Document) -> ParsedDocument:
         """Режим «Оригинал» (#7): вернуть текст до правок."""
         original_key: str | None = getattr(document, "original_storage_key", None)
-        storage_key = original_key or document.storage_key
+        return (await self._read_layout(original_key or document.storage_key)).document
+
+    async def _read_layout(self, storage_key: str) -> DocumentLayout:
         raw_bytes = await self._storage.download(storage_key)
-        return self._parser_registry.parse_by_filename(storage_key, raw_bytes)
+        if self._layout_reader is None:
+            return DocumentLayout(self._parser_registry.parse_by_filename(storage_key, raw_bytes))
+        return await self._layout_reader.read(storage_key, raw_bytes)

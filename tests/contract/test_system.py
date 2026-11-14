@@ -1,6 +1,7 @@
 """Служебные эндпоинты: диагностика LLM и анализа только для администратора."""
 
 import io
+from pathlib import Path
 
 import pytest
 
@@ -110,8 +111,8 @@ async def test_capabilities_match_real_behaviour(client: AsyncClient) -> None:
     """Значения capabilities должны совпадать с тем, что API на самом деле принимает."""
     caps = (await client.get("/api/v1/system/capabilities")).json()
     upload = caps["upload"]
-    assert upload["document_extensions"] == [".docx", ".markdown", ".md", ".txt"]
-    assert upload["document_formats"] == ["docx", "markdown", "txt"]
+    assert upload["document_extensions"] == [".docx", ".markdown", ".md", ".pdf", ".txt"]
+    assert upload["document_formats"] == ["docx", "markdown", "pdf", "txt"]
     assert upload["unsupported_extensions"] == [".doc"]
     assert upload["max_size_bytes"] == upload["max_size_mb"] * 1024 * 1024
     assert caps["export"]["same_format_only"] is True
@@ -145,6 +146,8 @@ async def test_capabilities_match_real_behaviour(client: AsyncClient) -> None:
 
 
 def _sample(extension: str) -> bytes:
+    if extension == ".pdf":
+        return (Path(__file__).parents[1] / "fixtures" / "pdf" / "headings_lists.pdf").read_bytes()
     if extension != ".docx":
         return b"text"
     buffer = io.BytesIO()

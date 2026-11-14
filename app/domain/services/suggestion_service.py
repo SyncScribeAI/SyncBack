@@ -24,6 +24,7 @@ from app.domain.exceptions import (
     SuggestionAlreadyDecidedError,
     SuggestionNotFoundError,
     SuggestionResetNotAllowedError,
+    UnsupportedExportFormatError,
 )
 from app.domain.interfaces.entities import DocumentProtocol, SuggestionProtocol
 from app.domain.interfaces.event_publisher import IEventPublisher
@@ -127,6 +128,8 @@ class SuggestionService:
     ) -> None:
         try:
             await export_service.export_and_save(document)
+        except UnsupportedExportFormatError as err:
+            raise ReviewNotCompleteError(str(err)) from err
         except Exception as err:
             logger.exception(
                 "Не удалось материализовать финальный файл",

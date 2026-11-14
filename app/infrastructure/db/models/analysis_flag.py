@@ -56,6 +56,8 @@ class AnalysisFlag(Base):
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     # [{"source_name": ..., "text": ...}] — читается только целиком, вместе с флагом.
     quotes: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    # Прямоугольники блока на страницах PDF; у других форматов None.
+    geometry: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="pending", server_default="pending"

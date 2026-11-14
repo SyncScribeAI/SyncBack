@@ -90,6 +90,7 @@ class DocumentFormatVO(StrEnum):
     DOC = "doc"
     TXT = "txt"
     MARKDOWN = "markdown"
+    PDF = "pdf"
 
 
 class AuditActionVO(StrEnum):

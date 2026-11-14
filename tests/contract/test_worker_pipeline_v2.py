@@ -36,6 +36,8 @@ from app.infrastructure.db.models.analysis_job import AnalysisJob
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.suggestion import Suggestion
 from app.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
+from app.infrastructure.layout.cached_reader import CachedDocumentLayoutReader
+from app.workers.tasks.runtime import get_parser_registry
 from app.domain.value_objects import DocumentStatusVO
 from tests.contract.conftest import (
     InMemoryFileStorage,
@@ -145,6 +147,8 @@ def worker(
     connector = FakeConnector()
     monkeypatch.setattr(v2, "uow_factory", uow_factory)
     monkeypatch.setattr(v2, "get_storage", lambda: file_storage)
+    reader = CachedDocumentLayoutReader(get_parser_registry(), file_storage)
+    monkeypatch.setattr(v2, "get_document_layout_reader", lambda: reader)
     monkeypatch.setattr(v2, "get_connector_for", lambda kind: connector)
     monkeypatch.setattr(v2, "event_publisher", Recorder)
     monkeypatch.setattr(v2, "_get_analyzer", lambda: analyzer)

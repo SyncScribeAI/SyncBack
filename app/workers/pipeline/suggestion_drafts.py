@@ -11,6 +11,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 
+from app.domain.document_geometry import rects_to_json
 from app.domain.evidence import EvidenceSource, evidence_to_json
 from app.domain.services.analysis_result_mapper import SuggestionDraft
 from app.infrastructure.db.models.enums import ChangeType
@@ -47,6 +48,7 @@ def to_suggestions(
             confidence_score=draft.confidence_score,
             sources=_cited_sources(draft, rows, by_id) or list(sources),
             evidence=evidence_to_json(draft.evidence, rows) if draft.evidence else None,
+            geometry=rects_to_json(draft.geometry),
         )
         for draft in drafts
     ]

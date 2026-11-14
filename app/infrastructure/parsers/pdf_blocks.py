@@ -20,7 +20,7 @@ from statistics import median
 from typing import Any
 
 from app.domain.document_blocks import DocumentBlocksBuilder, heading_title
-from app.domain.document_geometry import TextRuns
+from app.domain.document_geometry import PageSize, TextRuns
 from app.domain.interfaces.document_parser import (
     DocumentBlockType,
     DocumentSection,
@@ -86,6 +86,7 @@ class PdfLayout:
 
     blocks: list[_Block]
     pages_without_text: tuple[int, ...]
+    pages: tuple[PageSize, ...] = ()
 
     def to_document(self) -> tuple[ParsedDocument, TextRuns]:
         parts: list[str] = []
@@ -139,7 +140,8 @@ def build_layout(pages: Sequence[PdfPageLines]) -> PdfLayout:
         _append_page(blocks, page, lines, body_size)
     _assign_heading_levels(blocks)
     empty = tuple(page.number for page in pages if not page.lines)
-    return PdfLayout(blocks, empty)
+    sizes = tuple(PageSize(page.number, page.width, page.height) for page in pages)
+    return PdfLayout(blocks, empty, sizes)
 
 
 # --------------------------------------------------------------------------- страница

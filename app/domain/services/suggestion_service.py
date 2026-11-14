@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
 from app.domain.exceptions import (
+    DocumentExportIntegrityError,
     DocumentNotFoundError,
     InvalidDocumentStatusError,
     OptimisticLockError,
@@ -129,6 +130,12 @@ class SuggestionService:
         try:
             await export_service.export_and_save(document)
         except UnsupportedExportFormatError as err:
+            raise ReviewNotCompleteError(str(err)) from err
+        except DocumentExportIntegrityError as err:
+            logger.error(
+                "Финальный файл искажает текст и не сохранён",
+                extra={"document_id": str(document.id)},
+            )
             raise ReviewNotCompleteError(str(err)) from err
         except Exception as err:
             logger.exception(

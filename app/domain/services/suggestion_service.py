@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
@@ -42,7 +43,7 @@ from app.domain.value_objects import (
 )
 
 if TYPE_CHECKING:
-    from app.domain.services.document_export_service import DocumentExportService
+    from app.domain.services.document_export_service import DocumentExportService, StagedExport
 
 logger = logging.getLogger("syncscribe.services.suggestion")
 
@@ -122,13 +123,34 @@ class SuggestionService:
             )
         return suggestion
 
+    @asynccontextmanager
+    async def _export_settlement(
+        self, export_service: DocumentExportService | None
+    ) -> AsyncIterator[list[StagedExport]]:
+        """Убрать из хранилища сборку экспорта, на которую БД не ссылается после транзакции.
+
+        Блок должен охватывать транзакцию ревью целиком: исход commit известен только
+        после выхода из неё.
+        """
+        staged: list[StagedExport] = []
+        try:
+            yield staged
+        except BaseException:
+            if export_service is not None:
+                for item in staged:
+                    await export_service.settle_export(item, committed=False)
+            raise
+        if export_service is not None:
+            for item in staged:
+                await export_service.settle_export(item, committed=True)
+
     async def _run_export(
         self,
         document: DocumentProtocol,
         export_service: DocumentExportService,
-    ) -> None:
+    ) -> StagedExport:
         try:
-            await export_service.export_and_save(document)
+            return await export_service.stage_export(document, self._uow)
         except UnsupportedExportFormatError as err:
             raise ReviewNotCompleteError(str(err)) from err
         except DocumentExportIntegrityError as err:
@@ -401,7 +423,7 @@ class SuggestionService:
         export_service: DocumentExportService | None = None,
     ) -> DocumentProtocol:
         """Завершить ревью: все правки рассмотрены → документ в READY."""
-        async with self._uow:
+        async with self._export_settlement(export_service) as staged, self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             self._assert_awaiting_approval(document)
             job_id = self._assert_has_active_job(document)
@@ -414,7 +436,7 @@ class SuggestionService:
                     f"Нельзя завершить review: не рассмотрено предложений — {pending_count}"
                 )
             if export_service is not None:
-                await self._run_export(document, export_service)
+                staged.append(await self._run_export(document, export_service))
             document = await self._finish_review(document)
             await self._commit()
         return document
@@ -438,7 +460,7 @@ class SuggestionService:
         предложений (suggestion_id → текст); для id вне accepted_ids игнорируются.
         """
         edits = dict(edited_texts or {})
-        async with self._uow:
+        async with self._export_settlement(export_service) as staged, self._uow:
             document = await self._get_document_or_raise(project_id, document_id)
             self._assert_awaiting_approval(document)
             job_id = self._assert_has_active_job(document)
@@ -499,7 +521,7 @@ class SuggestionService:
                         f"Нельзя завершить ревью: осталось правок — {pending_count}"
                     )
                 if export_service is not None:
-                    await self._run_export(document, export_service)
+                    staged.append(await self._run_export(document, export_service))
                 document = await self._finish_review(document)
                 finalized = True
 

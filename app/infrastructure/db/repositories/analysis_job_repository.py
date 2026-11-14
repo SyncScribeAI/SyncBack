@@ -87,7 +87,7 @@ class AnalysisJobRepository(IAnalysisJobRepository):
                 AnalysisJob.document_id == document_id,
                 AnalysisJob.status.in_(_ACTIVE_ORM_STATUSES),
             )
-            .order_by(AnalysisJob.created_at.desc())
+            .order_by(AnalysisJob.created_at.desc(), AnalysisJob.id.desc())
             .limit(1)
         )
         return result.scalar_one_or_none()
@@ -100,7 +100,9 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         stmt = (
             select(AnalysisJob)
             .where(AnalysisJob.document_id == document_id)
-            .order_by(AnalysisJob.created_at.desc())
+            # id замыкает порядок так же, как курсор keyset: при равном created_at
+            # иначе страницы теряли бы или повторяли задачи.
+            .order_by(AnalysisJob.created_at.desc(), AnalysisJob.id.desc())
         )
         if isinstance(pagination, KeysetPage):
             if pagination.has_cursor:

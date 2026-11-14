@@ -11,6 +11,8 @@ uow.suggestions, а не через SuggestionService — иначе получ�
 from __future__ import annotations
 
 import asyncio
+import logging
+from dataclasses import dataclass
 
 from app.domain.document_geometry import rects_from_json
 from app.domain.exceptions import InvalidDocumentStatusError, UnsupportedExportFormatError
@@ -19,7 +21,10 @@ from app.domain.interfaces.entities import DocumentProtocol
 from app.domain.interfaces.file_storage import FileStorage, UploadContent
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.lifecycle import DocumentLifecycle
+from app.domain.storage_keys import exported_document_key
 from app.domain.value_objects import DocumentFormatVO, SuggestionStatusVO
+
+logger = logging.getLogger("syncscribe.services.document_export")
 
 _MEDIA_TYPES: dict[DocumentFormatVO, str] = {
     DocumentFormatVO.DOCX: (
@@ -39,6 +44,14 @@ _EXPORT_PAGE_SIZE: int = 500
 def media_type_for(document_format: DocumentFormatVO) -> str:
     """MIME-тип файла документа по его формату (экспорт и отдача исходника)."""
     return _MEDIA_TYPES.get(document_format, "application/octet-stream")
+
+
+@dataclass(frozen=True, slots=True)
+class StagedExport:
+    """Собранный файл экспорта, ключ которого записан в ещё не зафиксированную транзакцию."""
+
+    key: str
+    previous_key: str | None
 
 
 class DocumentExportService:
@@ -77,21 +90,41 @@ class DocumentExportService:
         exported_bytes = await self._apply_accepted_changes(document)
         return exported_bytes, document.name, media_type_for(source_format)
 
-    async def export_and_save(self, document: DocumentProtocol) -> None:
-        """Применить правки, сохранить результат в хранилище и записать exported_storage_key.
+    async def stage_export(self, document: DocumentProtocol, uow: IUnitOfWork) -> StagedExport:
+        """Собрать файл с принятыми правками внутри транзакции вызывающего, не фиксируя её.
 
-        Чтение правок и запись ключа идут в разных транзакциях: между ними
-        загрузка в хранилище, и держать транзакцию открытой на время I/O нельзя.
+        Фиксирует транзакцию только вызывающий: экспорт входит в сохранение ревью, и
+        собственный commit зафиксировал бы решения и версию ревью раньше, чем документ
+        перейдёт в ready. Правки читаются через uow вызывающего, поэтому в файл попадают
+        и решения этой же транзакции. После commit или отката вызывающий передаёт
+        результат в settle_export.
         """
-        exported_bytes = await self._apply_accepted_changes(document)
+        raw_bytes = await self._storage.download(document.storage_key)
+        changes = await self._iter_accepted_changes_pages(document, uow)
+        exported_bytes = await self._build(document, raw_bytes, changes)
+
+        staged = StagedExport(
+            key=exported_document_key(document.storage_key),
+            previous_key=document.exported_storage_key,
+        )
         media_type = media_type_for(DocumentFormatVO(document.format))
+        await self._storage.upload(staged.key, UploadContent.from_bytes(exported_bytes, media_type))
+        await uow.documents.update_exported_key(document, staged.key)
+        return staged
 
-        export_key = f"{document.storage_key}.exported"
-        await self._storage.upload(export_key, UploadContent.from_bytes(exported_bytes, media_type))
+    async def settle_export(self, staged: StagedExport, *, committed: bool) -> None:
+        """Удалить файл, на который БД больше не ссылается.
 
-        async with self._uow:
-            await self._uow.documents.update_exported_key(document, export_key)
-            await self._uow.commit()
+        После commit это прежняя сборка, после отката новая. Сбой удаления только
+        пишется в лог: ревью уже сохранено или уже отклонено, а лишний объект безвреден.
+        """
+        stale = staged.previous_key if committed else staged.key
+        if stale is None:
+            return
+        try:
+            await self._storage.delete(stale)
+        except Exception:
+            logger.warning("Файл экспорта не удалён из хранилища", exc_info=True)
 
     async def _apply_accepted_changes(self, document: DocumentProtocol) -> bytes:
         """Исходный файл из хранилища с применёнными принятыми правками.
@@ -103,10 +136,17 @@ class DocumentExportService:
         raw_bytes = await self._storage.download(document.storage_key)
         async with self._uow:
             changes = await self._iter_accepted_changes_pages(document)
+        return await self._build(document, raw_bytes, changes)
+
+    async def _build(
+        self, document: DocumentProtocol, raw_bytes: bytes, changes: list[AppliedChange]
+    ) -> bytes:
         exporter = self._exporters.get_exporter(DocumentFormatVO(document.format))
         return await asyncio.to_thread(exporter.apply_changes, raw_bytes, changes)
 
-    async def _iter_accepted_changes_pages(self, document: DocumentProtocol) -> list[AppliedChange]:
+    async def _iter_accepted_changes_pages(
+        self, document: DocumentProtocol, uow: IUnitOfWork | None = None
+    ) -> list[AppliedChange]:
         """Курсорный обход принятых правок страницами по _EXPORT_PAGE_SIZE.
 
         ВАЖНО: метод НЕ открывает `async with self._uow`.
@@ -124,12 +164,13 @@ class DocumentExportService:
         """
         if document.current_analysis_job_id is None:
             return []
+        uow = uow or self._uow
 
         changes: list[AppliedChange] = []
         offset = 0
 
         while True:
-            page = await self._uow.suggestions.list_by_analysis_job_and_status_page(
+            page = await uow.suggestions.list_by_analysis_job_and_status_page(
                 document.current_analysis_job_id,
                 SuggestionStatusVO.ACCEPTED,
                 limit=_EXPORT_PAGE_SIZE,

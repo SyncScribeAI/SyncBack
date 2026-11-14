@@ -98,8 +98,16 @@ class _Subscribers:
                 )
 
     async def close_all(self) -> None:
+        """Положить маркер конца в каждую очередь, не дожидаясь потребителя.
+
+        Медленный клиент может держать очередь заполненной; ожидание свободного места
+        остановило бы shutdown. Ради маркера отбрасывается самое старое событие: при
+        закрытии потока клиент всё равно перечитает состояние.
+        """
         for queue in self._queues.values():
-            await queue.put(None)
+            if queue.full():
+                queue.get_nowait()
+            queue.put_nowait(None)
         self._queues.clear()
         self._filters.clear()
 

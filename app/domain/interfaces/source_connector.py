@@ -11,6 +11,7 @@ NOTE убран — тексты хранятся в файловом храни
 
 import enum
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -50,3 +51,7 @@ class SourceConnector(Protocol):
 
     async def get_metadata(self, source: SourceRef) -> SourceMetadata: ...
     def supports(self, source_type: SourceKind) -> bool: ...
+
+
+# Выбор коннектора по типу источника; сборка коннекторов остаётся в точках сборки.
+SourceConnectorResolver = Callable[[SourceKind], SourceConnector]

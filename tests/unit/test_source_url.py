@@ -5,7 +5,7 @@ import ipaddress
 import pytest
 
 from app.domain.exceptions import InvalidSourceUrlError
-from app.domain.source_url import SourceUrl, is_public_address
+from app.domain.source_url import SourceUrl, SourceUrlPolicy, is_public_address
 
 
 @pytest.mark.parametrize(
@@ -105,3 +105,57 @@ def test_rejects_too_long_url() -> None:
 )
 def test_is_public_address(address: str, public: bool) -> None:
     assert is_public_address(ipaddress.ip_address(address)) is public
+
+
+def _policy(**kwargs: object) -> SourceUrlPolicy:
+
+    defaults: dict[str, object] = {
+        "hosts": ["wiki.corp", ".portal.local"],
+        "networks": ["10.0.0.0/8"],
+        "allow_public": True,
+    }
+    defaults.update(kwargs)
+    return SourceUrlPolicy.from_lists(
+        defaults["hosts"], defaults["networks"], allow_public=bool(defaults["allow_public"])
+    )
+
+
+def test_policy_suffix_needs_leading_dot_match() -> None:
+    policy = _policy()
+    assert policy.is_listed("docs.portal.local")
+    assert not policy.is_listed("portal.local")
+    assert not policy.is_listed("xwiki.corp")
+    assert policy.is_listed("wiki.corp")
+
+
+def test_listed_local_name_passes_parse() -> None:
+    assert SourceUrl.parse("https://docs.portal.local/a", _policy()).host == "docs.portal.local"
+    with pytest.raises(InvalidSourceUrlError):
+        SourceUrl.parse("https://other.local/a", _policy())
+
+
+def test_private_literal_needs_listing_and_network() -> None:
+    with pytest.raises(InvalidSourceUrlError):
+        SourceUrl.parse("http://10.1.2.3/", _policy())
+    policy = _policy(hosts=["10.1.2.3"])
+    assert SourceUrl.parse("http://10.1.2.3/", policy).host == "10.1.2.3"
+
+
+def test_metadata_address_is_forbidden_with_any_policy() -> None:
+    policy = _policy(hosts=["169.254.169.254"], networks=["0.0.0.0/0"])
+    with pytest.raises(InvalidSourceUrlError):
+        SourceUrl.parse("http://169.254.169.254/latest", policy)
+
+
+def test_public_disabled_keeps_only_whitelist() -> None:
+    policy = _policy(allow_public=False)
+    with pytest.raises(InvalidSourceUrlError):
+        SourceUrl.parse("https://example.com/", policy)
+    assert SourceUrl.parse("https://wiki.corp/", policy).host == "wiki.corp"
+
+
+def test_mapped_ipv6_is_checked_as_ipv4() -> None:
+    policy = _policy()
+    address = ipaddress.ip_address("::ffff:10.0.0.5")
+    assert policy.allows_address("wiki.corp", address)
+    assert not policy.allows_address("evil.example.com", address)

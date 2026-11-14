@@ -1,11 +1,14 @@
 """Единая точка чтения конфигурации приложения."""
 
+import ipaddress
 from functools import lru_cache
 from typing import Annotated, Literal
 from urllib.parse import unquote, urlsplit
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from app.domain.source_url import SourceUrlPolicy
 
 _WEAK_SECRET_VALUES = {
     "admin",
@@ -153,6 +156,52 @@ class Settings(BaseSettings):
     suggestion_propagate_exact: bool = False
     suggestion_propagate_max_groups: int = Field(default=50, gt=0, le=500)
     suggestion_propagate_max_per_group: int = Field(default=50, gt=0, le=500)
+
+    # Источники по ссылке. По умолчанию пускаются только публичные адреса. Внутренний
+    # портал доступен, когда его имя есть в SOURCE_URL_ALLOWED_HOSTS (точное имя или
+    # суффикс с ведущей точкой) и адрес входит в SOURCE_URL_ALLOWED_NETWORKS. Подсеть
+    # Docker в список сетей не вносится: иначе ссылки дотянутся до сервисов compose.
+    source_url_allowed_hosts: Annotated[list[str], NoDecode] = []
+    source_url_allowed_networks: Annotated[list[str], NoDecode] = []
+    source_url_allow_public: bool = True
+    source_url_ca_bundle: str = ""
+    source_url_auth_headers_file: str = ""
+    source_url_user_agent: str = Field(
+        default="SyncScribeBot/1.0 (+https://syncscribe.app/bot)", min_length=1, max_length=200
+    )
+    source_url_robots: Literal["off", "log", "enforce"] = "log"
+    source_url_max_bytes: int = Field(default=5 * 1024 * 1024, gt=0)
+    source_url_connect_timeout_seconds: float = Field(default=5.0, gt=0)
+    source_url_read_timeout_seconds: float = Field(default=20.0, gt=0)
+
+    @field_validator("source_url_allowed_hosts", "source_url_allowed_networks", mode="before")
+    @classmethod
+    def _parse_comma_list(cls, v: object) -> list[str]:
+        if isinstance(v, str):
+            v = [item.strip() for item in v.split(",") if item.strip()]
+        if not isinstance(v, list):
+            raise ValueError("ожидается список через запятую")
+        return v
+
+    @field_validator("source_url_allowed_networks")
+    @classmethod
+    def _validate_networks(cls, v: list[str]) -> list[str]:
+        for network in v:
+            try:
+                ipaddress.ip_network(network, strict=False)
+            except ValueError as exc:
+                raise ValueError(
+                    f"SOURCE_URL_ALLOWED_NETWORKS: некорректная сеть {network}"
+                ) from exc
+        return v
+
+    @property
+    def source_url_policy(self) -> SourceUrlPolicy:
+        return SourceUrlPolicy.from_lists(
+            self.source_url_allowed_hosts,
+            self.source_url_allowed_networks,
+            allow_public=self.source_url_allow_public,
+        )
 
     @model_validator(mode="after")
     def _validate_analysis(self) -> "Settings":

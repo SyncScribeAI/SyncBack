@@ -48,6 +48,13 @@ class AnalysisJob(Base):
             postgresql_where=text("status IN ('pending', 'dispatched', 'processing')"),
             sqlite_where=text("status IN ('pending', 'dispatched', 'processing')"),
         ),
+        # Сверка ищет задачи, потерянные до отправки в брокер. Таких единицы, поэтому
+        # частичный индекс маленький и не растёт с историей анализов.
+        Index(
+            "ix_analysis_jobs_unqueued",
+            "created_at",
+            postgresql_where=text("celery_task_id IS NULL AND status IN ('pending', 'dispatched')"),
+        ),
         # Последняя задача документа: WHERE document_id = ? ORDER BY created_at DESC.
         Index("ix_analysis_jobs_doc_latest", "document_id", "created_at"),
         CheckConstraint("strategy IN ('auto', 'full')", name="ck_analysis_jobs_strategy"),

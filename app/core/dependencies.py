@@ -60,6 +60,7 @@ from app.infrastructure.exporters.exporter_registry import DocumentExporterRegis
 from app.infrastructure.layout.cached_reader import CachedDocumentLayoutReader
 from app.infrastructure.llm.factory import get_llm_client
 from app.infrastructure.ml_pipeline.factory import pipeline_health_check
+from app.infrastructure.parsers.parse_pool import get_parse_pool
 from app.infrastructure.parsers.parser_registry import DocumentParserRegistry
 from app.infrastructure.parsers.upload_file_inspector import ParserUploadFileInspector
 from app.infrastructure.queue.celery_analysis_queue import CeleryAnalysisQueue
@@ -94,7 +95,7 @@ def _get_url_connector() -> UrlConnector:
 def _connector_for(kind: SourceKind) -> SourceConnector:
     if kind is SourceKind.URL:
         return _get_url_connector()
-    return ManualUploadConnector(_get_file_storage(), _get_parser_registry())
+    return ManualUploadConnector(_get_file_storage(), _get_parser_registry(), get_parse_pool())
 
 
 @lru_cache
@@ -173,7 +174,7 @@ def get_project_service(
 
 
 def get_document_layout_reader() -> DocumentLayoutReader:
-    return CachedDocumentLayoutReader(_get_parser_registry(), _get_file_storage())
+    return CachedDocumentLayoutReader(_get_parser_registry(), _get_file_storage(), get_parse_pool())
 
 
 def get_document_service(
@@ -188,6 +189,7 @@ def get_document_service(
         download_url_ttl_seconds=settings.s3_presigned_url_expire_seconds,
         file_inspector=ParserUploadFileInspector(settings.pdf_max_pages),
         layout_reader=get_document_layout_reader(),
+        parse_pool=get_parse_pool(),
     )
 
 
@@ -204,6 +206,7 @@ def get_source_service(
         connector_for=_connector_for,
         max_source_chars=settings.analysis_max_source_chars,
         file_inspector=ParserUploadFileInspector(settings.pdf_max_pages),
+        parse_pool=get_parse_pool(),
     )
 
 

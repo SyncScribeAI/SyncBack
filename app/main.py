@@ -30,6 +30,7 @@ from app.api.v1.routers.system import router as system_router
 from app.core.body_size_limit_middleware import BodySizeLimitMiddleware
 from app.core.config import get_settings
 from app.core.correlation_middleware import CorrelationIdMiddleware
+from app.core.dispatch_reconciler import start_dispatch_reconciler, stop_dispatch_reconciler
 from app.core.limiter import limiter
 from app.core.logging_setup import configure_logging
 from app.domain.exceptions import (
@@ -65,10 +66,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
 
     await init_sse_broker(redis_url=settings.redis_url, channel=settings.redis_sse_channel)
+    reconciler = start_dispatch_reconciler(settings)
 
     try:
         yield
     finally:
+        await stop_dispatch_reconciler(reconciler)
         await shutdown_sse_broker()
         await dispose_engine()
         logger.info("Остановка SyncScribe backend")

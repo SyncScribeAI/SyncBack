@@ -41,7 +41,8 @@ import logging
 import random
 import time
 import uuid
-from collections.abc import Callable, Collection, Coroutine, Mapping, Sequence
+from collections.abc import Callable, Collection, Coroutine, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -52,6 +53,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from app.core.config import get_settings
 from app.domain.analysis_reuse import (
     AnalysisStrategy,
+    Baseline,
     DeltaFallback,
     DeltaPolicy,
     DeltaSummary,
@@ -62,6 +64,7 @@ from app.domain.analysis_reuse import (
     analysis_input_hash,
     decide_reuse,
     delta_precheck,
+    sources_replaced_check,
 )
 from app.domain.document_geometry import highlight_span
 from app.domain.evidence import EvidenceSource, evidence_sources_of
@@ -157,6 +160,8 @@ class _JobFailed(Exception):
     """Терминальная ошибка шага: задача завершается failed с этим кодом.
 
     run — сводка вызова ML, если ответ был: request_id нужен и для разбора отказа.
+    fetched: источники попытки, если их снимки уже лежат в хранилище. finish
+    регистрирует снимки, иначе объект остался бы без записи и вне очистки документа.
     """
 
     def __init__(self, code: str, message: str, run: PipelineRunSummary | None = None) -> None:
@@ -164,6 +169,7 @@ class _JobFailed(Exception):
         self.code = code
         self.message = message
         self.run = run
+        self.fetched: _FetchedSources | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,9 +217,30 @@ async def analyze_document(
             extra={"job_id": job_id, "attempt": attempt, "error_code": failure.code},
         )
         await finish(
-            job_uuid, AnalysisJobStatusVO.FAILED, failure.code, failure.message, run=failure.run
+            job_uuid,
+            AnalysisJobStatusVO.FAILED,
+            failure.code,
+            failure.message,
+            run=failure.run,
+            **_snapshot_records(failure.fetched),
         )
         return None
+
+
+@contextmanager
+def _registers_snapshots(fetched: _FetchedSources) -> Iterator[None]:
+    try:
+        yield
+    except _JobFailed as failure:
+        failure.fetched = fetched
+        raise
+
+
+def _snapshot_records(fetched: _FetchedSources | None) -> dict[str, Any]:
+    """Аргументы finish для снимков, уже сохранённых в хранилище."""
+    if fetched is None or not fetched.snapshots:
+        return {}
+    return {"snapshots": fetched.snapshots, "job_sources": _numbered(fetched.records)}
 
 
 async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
@@ -230,102 +257,108 @@ async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
             "SOURCES_UNAVAILABLE", "Недоступны все источники: " + ", ".join(fetched.failed)
         )
     await _store_snapshots(job.id, fetched.snapshots)
-    decision, input_hash = await _decide(job, document_hash, fetched)
-    if decision.reuse and decision.baseline is not None:
-        await _carry_over(
-            job, decision, input_hash, document_hash, fetched, sum(1 for _ in document.blocks)
+    # Снимки уже в хранилище: любой отказ дальше должен их зарегистрировать.
+    with _registers_snapshots(fetched):
+        decision, input_hash = await _decide(job, document_hash, fetched)
+        if decision.reuse and decision.baseline is not None:
+            await _carry_over(
+                job, decision, input_hash, document_hash, fetched, sum(1 for _ in document.blocks)
+            )
+            return None
+        delta = await _plan_delta(job, decision, document, document_hash, fetched)
+        delta_request = delta if isinstance(delta, DeltaRequest) else None
+        fallback = delta if isinstance(delta, DeltaFallback) else None
+        run_input = RunInput(
+            input_hash=input_hash,
+            contract_version=CONTRACT_VERSION,
+            provider=_settings.analysis_provider,
+            decision=decision,
+            stats=reused_run_stats(fetched.segments, fetched.snapshots, 0),
+            document_hash=document_hash,
+            fallback=fallback,
+        )
+        if delta_request is not None and not delta_request.calls_model:
+            # Источник только потерял текст: модели нечего показать, перенос сам отметит
+            # правки, основание которых исчезло.
+            blocks = {block.ref: block.text_in(document.plain_text) for block in document.blocks}
+            await _finish_delta(job, delta_request, run_input, fetched, (), (), None, blocks)
+            return None
+        audit = delta_request is not None and random.random() < _settings.analysis_delta_audit_rate
+        full_request = _build_request(job, attempt, document, fetched.payloads) if audit else None
+        if delta_request is None:
+            request = full_request or _build_request(job, attempt, document, fetched.payloads)
+            run_input = replace(
+                run_input,
+                stats=full_run_stats(
+                    fetched.segments,
+                    fetched.snapshots,
+                    blocks=len(request.document.blocks),
+                    checked=sum(1 for block in request.document.blocks if block.editable),
+                ),
+                delta=await _delta(job, decision, fetched),
+            )
+        else:
+            request = _build_request(
+                job, attempt, document, delta_request.sources, delta_request.selected.refs
+            )
+            run_input = replace(
+                run_input,
+                stats=delta_request.stats,
+                delta=delta_request.summary,
+                selective=True,
+                selection=delta_request.selected.as_meta(),
+            )
+        # Документ больше не нужен: тексты блоков уже в запросе.
+        del document
+        await _store_payload(job.id, attempt, "request", lambda: encode_request(request))
+
+        started_at = time.perf_counter()
+        try:
+            result = await _get_analyzer().analyze(request)
+        except LLMTimeoutError as exc:
+            _log_call(job.id, attempt, request, started_at, "timeout")
+            return await _retry_or_fail(job.id, attempt, str(exc), fetched=fetched)
+        except LLMInvalidResponseError as exc:
+            _log_call(job.id, attempt, request, started_at, "invalid_response")
+            raise _JobFailed("LLM_INVALID_RESPONSE", str(exc)) from exc
+        await _store_payload(job.id, attempt, "response", lambda: pydantic_core.to_json(result))
+        run = _summarize(job.id, request, result)
+        _log_call(job.id, attempt, request, started_at, result.status.value, result, run)
+
+        outcome = AnalysisJobLifecycle.outcome_for(result, fetched.failed)
+        if outcome.retryable:
+            return await _retry_or_fail(
+                job.id, attempt, outcome.error_message or "", run, fetched=fetched
+            )
+        if outcome.status is AnalysisJobStatusVO.FAILED:
+            raise _JobFailed(
+                outcome.error_code or "LLM_UNAVAILABLE", outcome.error_message or "", run
+            )
+
+        job_sources = _numbered(fetched.records)
+        drafts, flags, run = await _located_result(job, attempt, result, request, fetched, run)
+        if delta_request is not None:
+            blocks = {block.ref: block.text for block in request.document.blocks}
+            delta_blocks = await _finish_delta(
+                job, delta_request, run_input, fetched, drafts, flags, run, blocks, outcome
+            )
+            if full_request is not None and delta_blocks is not None:
+                await _audit(job, attempt, full_request, fetched, delta_blocks)
+            return None
+        await finish(
+            job.id,
+            outcome.status,
+            outcome.error_code,
+            outcome.error_message,
+            drafts=drafts,
+            flags=flags,
+            source_ids=fetched.ids,
+            run=run,
+            snapshots=fetched.snapshots,
+            job_sources=job_sources,
+            run_input=run_input,
         )
         return None
-    delta = await _plan_delta(job, decision, document, document_hash, fetched)
-    delta_request = delta if isinstance(delta, DeltaRequest) else None
-    fallback = delta if isinstance(delta, DeltaFallback) else None
-    run_input = RunInput(
-        input_hash=input_hash,
-        contract_version=CONTRACT_VERSION,
-        provider=_settings.analysis_provider,
-        decision=decision,
-        stats=reused_run_stats(fetched.segments, fetched.snapshots, 0),
-        document_hash=document_hash,
-        fallback=fallback,
-    )
-    if delta_request is not None and not delta_request.calls_model:
-        # Источник только потерял текст: модели нечего показать, перенос сам отметит
-        # правки, основание которых исчезло.
-        blocks = {block.ref: block.text_in(document.plain_text) for block in document.blocks}
-        await _finish_delta(job, delta_request, run_input, fetched, (), (), None, blocks)
-        return None
-    audit = delta_request is not None and random.random() < _settings.analysis_delta_audit_rate
-    full_request = _build_request(job, attempt, document, fetched.payloads) if audit else None
-    if delta_request is None:
-        request = full_request or _build_request(job, attempt, document, fetched.payloads)
-        run_input = replace(
-            run_input,
-            stats=full_run_stats(
-                fetched.segments,
-                fetched.snapshots,
-                blocks=len(request.document.blocks),
-                checked=sum(1 for block in request.document.blocks if block.editable),
-            ),
-            delta=await _delta(job, decision, fetched),
-        )
-    else:
-        request = _build_request(
-            job, attempt, document, delta_request.sources, delta_request.selected.refs
-        )
-        run_input = replace(
-            run_input,
-            stats=delta_request.stats,
-            delta=delta_request.summary,
-            selective=True,
-            selection=delta_request.selected.as_meta(),
-        )
-    # Документ больше не нужен: тексты блоков уже в запросе.
-    del document
-    await _store_payload(job.id, attempt, "request", lambda: encode_request(request))
-
-    started_at = time.perf_counter()
-    try:
-        result = await _get_analyzer().analyze(request)
-    except LLMTimeoutError as exc:
-        _log_call(job.id, attempt, request, started_at, "timeout")
-        return await _retry_or_fail(job.id, attempt, str(exc))
-    except LLMInvalidResponseError as exc:
-        _log_call(job.id, attempt, request, started_at, "invalid_response")
-        raise _JobFailed("LLM_INVALID_RESPONSE", str(exc)) from exc
-    await _store_payload(job.id, attempt, "response", lambda: pydantic_core.to_json(result))
-    run = _summarize(job.id, request, result)
-    _log_call(job.id, attempt, request, started_at, result.status.value, result, run)
-
-    outcome = AnalysisJobLifecycle.outcome_for(result, fetched.failed)
-    if outcome.retryable:
-        return await _retry_or_fail(job.id, attempt, outcome.error_message or "", run)
-    if outcome.status is AnalysisJobStatusVO.FAILED:
-        raise _JobFailed(outcome.error_code or "LLM_UNAVAILABLE", outcome.error_message or "", run)
-
-    job_sources = _numbered(fetched.records)
-    drafts, flags, run = await _located_result(job, attempt, result, request, fetched, run)
-    if delta_request is not None:
-        blocks = {block.ref: block.text for block in request.document.blocks}
-        delta_blocks = await _finish_delta(
-            job, delta_request, run_input, fetched, drafts, flags, run, blocks, outcome
-        )
-        if full_request is not None and delta_blocks is not None:
-            await _audit(job, attempt, full_request, fetched, delta_blocks)
-        return None
-    await finish(
-        job.id,
-        outcome.status,
-        outcome.error_code,
-        outcome.error_message,
-        drafts=drafts,
-        flags=flags,
-        source_ids=fetched.ids,
-        run=run,
-        snapshots=fetched.snapshots,
-        job_sources=job_sources,
-        run_input=run_input,
-    )
-    return None
 
 
 async def _located_result(
@@ -378,45 +411,63 @@ async def _plan_delta(
         policy=policy,
     )
     if fallback is None:
-        async with uow_factory() as uow:
-            baseline_sources = await uow.snapshots.list_job_sources(baseline.job_id)
-            suggestions = await uow.suggestions.baseline_rows(baseline.job_id)
-            flags = await uow.flags.baseline_rows(baseline.job_id)
-        fingerprints = await load_baseline_fingerprints(
-            get_storage(), baseline_sources, fetched.snapshots, job.id
-        )
-        if fingerprints is None:
-            fallback = DeltaFallback.FINGERPRINTS_UNAVAILABLE
-        else:
-            planned = build_delta_request(
-                baseline=baseline,
-                fingerprints=fingerprints,
-                document=document,
-                payloads=fetched.payloads,
-                segments=fetched.segments,
-                suggestions=suggestions,
-                flags=flags,
-                policy=policy,
-                limits=_delta_limits(),
-            )
-            if isinstance(planned, DeltaRequest):
-                logger.info(
-                    "Анализ v2: выборочная проверка блоков",
-                    extra={
-                        "job_id": str(job.id),
-                        "baseline_job_id": str(baseline.job_id),
-                        **planned.selected.as_meta(),
-                        "segments_sent": planned.stats.segments_sent,
-                        "segments_total": planned.stats.segments_total,
-                    },
-                )
-                return planned
-            fallback = planned
+        planned = await _plan_from_baseline(job, baseline, document, fetched, policy)
+        if isinstance(planned, DeltaRequest):
+            return planned
+        fallback = planned
     logger.info(
         "Анализ v2: выборочная проверка заменена полным анализом",
         extra={"job_id": str(job.id), "fallback_reason": fallback.value},
     )
     return fallback
+
+
+async def _plan_from_baseline(
+    job: _StartedJob,
+    baseline: Baseline,
+    document: DocumentInput,
+    fetched: _FetchedSources,
+    policy: DeltaPolicy,
+) -> DeltaRequest | DeltaFallback:
+    """Выборочный запрос против прошлой задачи или причина отказа от него."""
+    async with uow_factory() as uow:
+        baseline_sources = await uow.snapshots.list_job_sources(baseline.job_id)
+        suggestions = await uow.suggestions.baseline_rows(baseline.job_id)
+        flags = await uow.flags.baseline_rows(baseline.job_id)
+    replaced = sources_replaced_check(
+        (row.source_id for row in baseline_sources if row.source_id is not None),
+        (uuid.UUID(payload.id) for payload in fetched.payloads),
+    )
+    if replaced is not None:
+        return replaced
+    fingerprints = await load_baseline_fingerprints(
+        get_storage(), baseline_sources, fetched.snapshots, job.id
+    )
+    if fingerprints is None:
+        return DeltaFallback.FINGERPRINTS_UNAVAILABLE
+    planned = build_delta_request(
+        baseline=baseline,
+        fingerprints=fingerprints,
+        document=document,
+        payloads=fetched.payloads,
+        segments=fetched.segments,
+        suggestions=suggestions,
+        flags=flags,
+        policy=policy,
+        limits=_delta_limits(),
+    )
+    if isinstance(planned, DeltaRequest):
+        logger.info(
+            "Анализ v2: выборочная проверка блоков",
+            extra={
+                "job_id": str(job.id),
+                "baseline_job_id": str(baseline.job_id),
+                **planned.selected.as_meta(),
+                "segments_sent": planned.stats.segments_sent,
+                "segments_total": planned.stats.segments_total,
+            },
+        )
+    return planned
 
 
 def _delta_policy() -> DeltaPolicy:
@@ -548,7 +599,7 @@ async def _decide(
         provider=_settings.analysis_provider,
         document_hash=document_hash,
         sources=[
-            (payload.name, snapshot.content_hash)
+            (payload.id, payload.type.value, payload.name, snapshot.content_hash)
             for payload, snapshot in zip(fetched.payloads, fetched.snapshots, strict=True)
         ],
     )
@@ -986,7 +1037,12 @@ def _summarize(
 
 
 async def _retry_or_fail(
-    job_id: uuid.UUID, attempt: int, message: str, run: PipelineRunSummary | None = None
+    job_id: uuid.UUID,
+    attempt: int,
+    message: str,
+    run: PipelineRunSummary | None = None,
+    *,
+    fetched: _FetchedSources | None = None,
 ) -> RetryLater | None:
     if attempt < _settings.analysis_retry_limit:
         countdown = _RETRY_BACKOFF_SECONDS * (2**attempt)
@@ -995,7 +1051,14 @@ async def _retry_or_fail(
             extra={"job_id": str(job_id), "attempt": attempt, "countdown": countdown},
         )
         return RetryLater(countdown)
-    await finish(job_id, AnalysisJobStatusVO.FAILED, "LLM_UNAVAILABLE", message or None, run=run)
+    await finish(
+        job_id,
+        AnalysisJobStatusVO.FAILED,
+        "LLM_UNAVAILABLE",
+        message or None,
+        run=run,
+        **_snapshot_records(fetched),
+    )
     return None
 
 

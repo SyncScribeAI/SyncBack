@@ -14,10 +14,10 @@ S правок.
 вхождением old_text, как в TextExporter. Якоря нет или он не найден — правка не применяется;
 место вставки за модель не выбираем.
 
-Если атомы абзаца не сопоставляются с его текстом или правка задевает табуляцию или
-перенос строки, абзац переписывается прежним способом одним раном. Правка в результате
-поля не применяется. После сохранения файл разбирается заново и сверяется с ожидаемым
-текстом; отчёт с числом правок по способам применения пишется в лог.
+Если атомы абзаца не сопоставляются с его текстом, абзац переписывается одним раном.
+Правка в результате поля не применяется. После сохранения файл разбирается заново и
+сверяется с ожидаемым текстом. Расхождение означает испорченный текст, и такой файл
+пользователю не отдаётся: apply_changes бросает DocumentExportIntegrityError.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from typing import Any
 from docx import Document as DocxDocument
 from docx.text.paragraph import Paragraph
 
+from app.domain.exceptions import DocumentExportIntegrityError
 from app.domain.interfaces.document_exporter import AppliedChange
 from app.domain.text_normalization import normalize_text
 from app.infrastructure.docx_paragraphs import iter_docx_paragraphs
@@ -168,7 +169,7 @@ def _apply_paragraph(
     new_text = apply_edits(text, applicable)
     if EditOutcome.REWRITE in outcomes:
         report.rewritten += len(applicable)
-        report.reasons.append("правка задевает табуляцию или перенос строки")
+        report.reasons.append("правка не покрывает ни одного символа абзаца")
         rewrite_paragraph(paragraph, new_text)
     else:
         apply_in_runs(atoms, applicable)
@@ -178,7 +179,13 @@ def _apply_paragraph(
 
 class DocxExporter:
     def apply_changes(self, raw_bytes: bytes, changes: list[AppliedChange]) -> bytes:
-        result, _ = self.apply_changes_with_report(raw_bytes, changes)
+        """Файл с правками; DocumentExportIntegrityError, если сверка текста не сошлась."""
+        result, report = self.apply_changes_with_report(raw_bytes, changes)
+        if report.verified is False:
+            raise DocumentExportIntegrityError(
+                "Не удалось собрать DOCX без искажения текста. Скачайте документ в формате "
+                "Markdown или TXT и сообщите администратору."
+            )
         return result
 
     def apply_changes_with_report(

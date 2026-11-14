@@ -32,6 +32,12 @@ def _status_to_orm(vo: AnalysisJobStatusVO) -> AnalysisJobStatus:
 
 _ACTIVE_ORM_STATUSES = tuple(_status_to_orm(st) for st in AnalysisJobLifecycle.ACTIVE)
 
+# Незапущенные статусы: processing уже взят воркером и в сверке не нуждается.
+_UNQUEUED_ORM_STATUSES = (
+    _status_to_orm(AnalysisJobStatusVO.PENDING),
+    _status_to_orm(AnalysisJobStatusVO.DISPATCHED),
+)
+
 _IDEMPOTENCY_CONSTRAINT = "uq_analysis_jobs_doc_idem_key"
 
 
@@ -189,6 +195,26 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         )
         return result.scalar_one_or_none()
 
+    async def list_unqueued_before(self, cutoff: datetime, limit: int) -> list[uuid.UUID]:
+        # Условие совпадает с частичным индексом ix_analysis_jobs_unqueued: запрос читает
+        # только застрявшие задачи, а не всю историю анализов.
+        result = await self._session.execute(
+            select(AnalysisJob.id)
+            .where(*_unqueued_before(cutoff))
+            .order_by(AnalysisJob.created_at, AnalysisJob.id)
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def lock_unqueued(self, job_id: uuid.UUID, cutoff: datetime) -> AnalysisJob | None:
+        result = await self._session.execute(
+            select(AnalysisJob)
+            .where(AnalysisJob.id == job_id, *_unqueued_before(cutoff))
+            .with_for_update(skip_locked=True)
+            .execution_options(populate_existing=True)
+        )
+        return result.scalar_one_or_none()
+
     async def record_pipeline_run(self, job: AnalysisJob, run: PipelineRunSummary) -> None:
         job.request_id = run.request_id
         job.pipeline_meta = {
@@ -280,3 +306,11 @@ class AnalysisJobRepository(IAnalysisJobRepository):
             job.finished_at = now
         await self._session.flush()
         return job
+
+
+def _unqueued_before(cutoff: datetime) -> tuple[Any, ...]:
+    return (
+        AnalysisJob.status.in_(_UNQUEUED_ORM_STATUSES),
+        AnalysisJob.celery_task_id.is_(None),
+        AnalysisJob.created_at < cutoff,
+    )

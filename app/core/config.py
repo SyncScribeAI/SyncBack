@@ -183,6 +183,13 @@ class Settings(BaseSettings):
     # числу одновременных прогонов, которое выдерживает ML-конвейер. «celery» вернёт задачу в
     # общую очередь — для разработки с одним воркером.
     analysis_v2_queue: str = Field(default="analysis_v2", pattern=r"^[A-Za-z0-9_.-]{1,64}$")
+    # Задача без идентификатора в очереди старше ANALYSIS_DISPATCH_STALE_SECONDS считается
+    # потерянной между записью статуса и отправкой в брокер: сверка отправляет её заново.
+    # Порог выше обычной задержки отправки, иначе сверка продублирует живой запуск.
+    # Интервал 0 отключает сверку.
+    analysis_dispatch_stale_seconds: int = Field(default=300, ge=60)
+    analysis_dispatch_reconcile_interval_seconds: int = Field(default=60, ge=0)
+    analysis_dispatch_reconcile_batch: int = Field(default=50, gt=0, le=1000)
     suggestion_low_confidence_threshold: float = Field(default=0.7, ge=0, le=1)
     # Догоняющие правки для точных повторов фразы. Поиск — O(G·T) по тексту документа,
     # поэтому число групп и правок на группу ограничено сверху.

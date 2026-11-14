@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, NoReturn
 
@@ -249,6 +250,68 @@ class AnalysisJobService:
             job = await self._uow.jobs.set_celery_task_id(job, task_id)
             await self._commit()
         return job
+
+    async def requeue_lost_jobs(self, *, older_than: timedelta, limit: int) -> int:
+        """Отправить в брокер задачи, потерянные между записью статуса и отправкой.
+
+        dispatch_job фиксирует dispatched до отправки, и процесс, упавший в этом промежутке,
+        оставляет активную задачу без сообщения в очереди: она блокирует повторный запуск
+        навсегда. Признак потери тот же, что у такой задачи: нет celery_task_id, хотя
+        отправка обычно занимает доли секунды. Возвращает число отправленных задач.
+        Сложность O(K) запросов к БД и брокеру, K не больше limit.
+        """
+        cutoff = datetime.now(UTC) - older_than
+        async with self._uow:
+            job_ids = await self._uow.jobs.list_unqueued_before(cutoff, limit)
+        requeued = 0
+        for job_id in job_ids:
+            requeued += await self._requeue(job_id, cutoff)
+        return requeued
+
+    async def _requeue(self, job_id: uuid.UUID, cutoff: datetime) -> bool:
+        """Отправить одну задачу, удерживая её строку до записи celery_task_id.
+
+        Блокировка не даёт двум сверкам отправить задачу дважды, а воркер, получивший
+        сообщение раньше фиксации, дождётся её на mark_processing_if_active. Сбой брокера
+        завершает задачу так же, как в dispatch_job: пользователь видит причину и может
+        запустить анализ снова.
+        """
+        queue = self._require_queue()
+        async with self._uow:
+            job = await self._uow.jobs.lock_unqueued(job_id, cutoff)
+            if job is None:
+                return False
+            document = await self._uow.documents.get_by_id(job.document_id)
+            if document is None:
+                return False
+            sources = await self._uow.sources.list_for_analysis(document.project_id, document.id)
+            if AnalysisJobLifecycle.can_dispatch(job.status):
+                job = await self._set_job_status(job, document, AnalysisJobStatusVO.DISPATCHED)
+            try:
+                task_id = await queue.enqueue(job.id, [source.id for source in sources])
+            # Сбой брокера любого вида должен попасть в задачу, а не оборвать сверку.
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Сверка очереди: брокер недоступен, задача помечена FAILED",
+                    exc_info=True,
+                    extra={"job_id": str(job.id), "document_id": str(job.document_id)},
+                )
+                await self._set_job_status(
+                    job,
+                    document,
+                    AnalysisJobStatusVO.FAILED,
+                    error_code="QUEUE_UNAVAILABLE",
+                    error_message=str(exc),
+                )
+                await self._commit()
+                return False
+            await self._uow.jobs.set_celery_task_id(job, task_id)
+            await self._commit()
+        logger.info(
+            "Сверка очереди: потерянная задача отправлена в брокер",
+            extra={"job_id": str(job_id), "document_id": str(document.id)},
+        )
+        return True
 
     async def _mark_queue_unavailable(self, job: AnalysisJob, error_message: str) -> AnalysisJob:
         async with self._uow:

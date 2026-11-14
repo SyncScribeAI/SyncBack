@@ -200,6 +200,7 @@ erDiagram
 
 - `ix_analysis_jobs_doc_latest` (btree): `(document_id, created_at)`
 - `ix_analysis_jobs_document_id` (btree): `(document_id)`
+- `ix_analysis_jobs_unqueued` (btree): `(created_at) WHERE ((celery_task_id IS NULL) AND (status = ANY (ARRAY['pending'::analysis_job_status, 'dispatched'::analysis_job_status])))`
 - `uq_analysis_jobs_doc_idem_key` (уникальный, btree): `(document_id, idempotency_key)`
 - `uq_analysis_jobs_one_active_per_document` (уникальный, btree): `(document_id) WHERE (status = ANY (ARRAY['pending'::analysis_job_status, 'dispatched'::analysis_job_status, 'processing'::analysis_job_status]))`
 

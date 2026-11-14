@@ -9,6 +9,7 @@ from __future__ import annotations
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, TypedDict
 
 from app.domain.analysis_reuse import AnalysisStrategy, Baseline, RunInput
@@ -534,6 +535,24 @@ class IAnalysisJobRepository(ABC):
 
         Запись результата и смена статуса под этой блокировкой не дают двум доставкам
         одной задачи сохранить правки дважды.
+        """
+        ...
+
+    @abstractmethod
+    async def list_unqueued_before(self, cutoff: datetime, limit: int) -> list[uuid.UUID]:
+        """Незапущенные задачи без идентификатора в очереди, созданные раньше cutoff.
+
+        Такая задача осталась от процесса, упавшего между записью статуса и отправкой в
+        брокер. Старые идут первыми: они дольше всех блокируют повторный запуск.
+        """
+        ...
+
+    @abstractmethod
+    async def lock_unqueued(self, job_id: uuid.UUID, cutoff: datetime) -> AnalysisJob | None:
+        """Задача из list_unqueued_before под блокировкой строки; None, если её уже взяли.
+
+        Занятая строка пропускается без ожидания: её отправляет другая сверка или
+        отменяет пользователь.
         """
         ...
 

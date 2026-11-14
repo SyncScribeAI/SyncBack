@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import sqlalchemy as sa
 from sqlalchemy import (
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -49,6 +50,7 @@ class AnalysisJob(Base):
         ),
         # Последняя задача документа: WHERE document_id = ? ORDER BY created_at DESC.
         Index("ix_analysis_jobs_doc_latest", "document_id", "created_at"),
+        CheckConstraint("strategy IN ('auto', 'full')", name="ck_analysis_jobs_strategy"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -82,11 +84,29 @@ class AnalysisJob(Base):
     request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # {"contract_version", "provider", "meta"}; meta сверх лимита не сохраняется.
     pipeline_meta: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # sha256 входа анализа (app.domain.services.analysis_reuse.analysis_input_hash);
+    # NULL у задач legacy_llm и у задач, не дошедших до загрузки источников.
+    input_hash: Mapped[str | None] = mapped_column(sa.CHAR(64), nullable=True)
+    # auto разрешает перенос результата прошлой задачи, full всегда вызывает ML.
+    strategy: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="auto", server_default="auto"
+    )
     checked_blocks: Mapped[int | None] = mapped_column(Integer, nullable=True)
     failed_blocks: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    @property
+    def incremental_view(self) -> dict[str, Any] | None:
+        """Сводка переноса для ответа API; у задач до хэша входа её нет."""
+        value = (self.pipeline_meta or {}).get("incremental")
+        return value if isinstance(value, dict) else None
+
+    @property
+    def run_stats_view(self) -> dict[str, Any] | None:
+        value = (self.pipeline_meta or {}).get("run_stats")
+        return value if isinstance(value, dict) else None
 
     document: Mapped["Document"] = relationship(
         back_populates="analysis_jobs", foreign_keys=[document_id]

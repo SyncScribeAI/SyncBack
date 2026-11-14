@@ -61,6 +61,11 @@ class Suggestion(Base):
             "decided_by",
             postgresql_where=sa.text("decided_by IS NOT NULL"),
         ),
+        Index(
+            "ix_suggestions_carried_from_id",
+            "carried_from_id",
+            postgresql_where=sa.text("carried_from_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -123,6 +128,12 @@ class Suggestion(Base):
     )
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Строка прошлого анализа, из которой перенесена эта; NULL у результата вызова ML.
+    carried_from_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("suggestions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     analysis_job: Mapped["AnalysisJob"] = relationship(back_populates="suggestions")
     sources: Mapped[list["Source"]] = relationship(secondary="suggestion_sources", lazy="selectin")

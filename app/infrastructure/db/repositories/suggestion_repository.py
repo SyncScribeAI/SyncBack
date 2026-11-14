@@ -16,7 +16,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, case, func, literal, null, select, update
+from sqlalchemy import CursorResult, Table, case, func, insert, literal, null, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import SuggestionAlreadyDecidedError
@@ -29,6 +29,8 @@ from app.domain.value_objects import (
 )
 from app.infrastructure.db.models.enums import SuggestionStatus
 from app.infrastructure.db.models.suggestion import Suggestion
+from app.infrastructure.db.models.suggestion_source import suggestion_sources
+from app.infrastructure.db.repositories.carry_over import copy_job_rows
 
 _ORDER = (Suggestion.created_at.asc(), Suggestion.position.asc(), Suggestion.id.asc())
 
@@ -212,6 +214,26 @@ class SuggestionRepository(ISuggestionRepository):
         self._session.add_all(suggestions)
         await self._session.flush()
         return suggestions
+
+    async def carry_over(self, from_job_id: uuid.UUID, to_job_id: uuid.UUID) -> int:
+        copied = await copy_job_rows(
+            self._session, cast(Table, Suggestion.__table__), from_job_id, to_job_id
+        )
+        if copied:
+            # Связи с источниками идут через carried_from_id одним INSERT ... SELECT.
+            new = Suggestion.__table__.alias("new")
+            await self._session.execute(
+                insert(suggestion_sources).from_select(
+                    ["suggestion_id", "source_id"],
+                    select(new.c.id, suggestion_sources.c.source_id)
+                    .join(
+                        suggestion_sources,
+                        suggestion_sources.c.suggestion_id == new.c.carried_from_id,
+                    )
+                    .where(new.c.analysis_job_id == to_job_id),
+                )
+            )
+        return copied
 
     async def update_status(
         self,

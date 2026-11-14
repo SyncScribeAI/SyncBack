@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import hashlib
 import logging
 import time
 import uuid
@@ -48,6 +49,15 @@ from celery import Task
 from celery.exceptions import SoftTimeLimitExceeded
 
 from app.core.config import get_settings
+from app.domain.analysis_reuse import (
+    AnalysisStrategy,
+    DeltaSummary,
+    IncrementalMode,
+    ReuseDecision,
+    RunInput,
+    analysis_input_hash,
+    decide_reuse,
+)
 from app.domain.document_geometry import highlight_span
 from app.domain.evidence import EvidenceSource, evidence_sources_of
 from app.domain.exceptions import (
@@ -77,9 +87,11 @@ from app.domain.source_snapshot import (
     JobSourceRecord,
     JobSourceStatus,
     SnapshotDraft,
+    SourceSegment,
     distinct_drafts,
     fingerprints_storage_key,
     pack_fingerprints,
+    segment_fingerprints,
 )
 from app.domain.source_text import SourceLayout, ensure_source_fits
 from app.domain.value_objects import AnalysisJobStatusVO, DocumentFormatVO
@@ -88,6 +100,7 @@ from app.infrastructure.ml_pipeline.factory import analysis_limits, get_document
 from app.infrastructure.ml_pipeline.schemas import CONTRACT_VERSION, encode_request
 from app.workers.celery_app import celery_app
 from app.workers.pipeline.flag_drafts import to_flags
+from app.workers.pipeline.incremental import delta_against, full_run_stats, reused_run_stats
 from app.workers.pipeline.suggestion_drafts import to_suggestions
 from app.workers.tasks.job_completion import complete_job
 from app.workers.tasks.runtime import (
@@ -151,6 +164,7 @@ class _StartedJob:
     # Источники, которые не удалось даже описать (удалены, неизвестный тип).
     unavailable: tuple[str, ...]
     unavailable_records: tuple[JobSourceRecord, ...] = ()
+    strategy: str = AnalysisStrategy.AUTO.value
 
 
 @dataclass(slots=True)
@@ -163,6 +177,8 @@ class _FetchedSources:
     snapshots: list[SnapshotDraft] = field(default_factory=list)
     # Положение фрагментов в исходных файлах; параллельно payloads.
     layouts: list[SourceLayout] = field(default_factory=list)
+    # Сегменты с отпечатками; параллельно snapshots, нужны differ без второго прохода.
+    segments: list[list[tuple[SourceSegment, int]]] = field(default_factory=list)
 
 
 async def analyze_document(
@@ -191,7 +207,7 @@ async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
         # Сравнивать не с чем — как и прежний конвейер без источников, без вызова ML.
         await finish(job.id, AnalysisJobStatusVO.SUCCESS)
         return None
-    document = await _load_document(job)
+    document, document_hash = await _load_document(job)
     fetched = await _fetch_sources(job.sources, job.project_id)
     fetched.failed[:0] = job.unavailable
     fetched.records[:0] = job.unavailable_records
@@ -200,9 +216,26 @@ async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
             "SOURCES_UNAVAILABLE", "Недоступны все источники: " + ", ".join(fetched.failed)
         )
     await _store_snapshots(job.id, fetched.snapshots)
+    decision, input_hash = await _decide(job, document_hash, fetched)
+    if decision.reuse and decision.baseline is not None:
+        await _carry_over(job, decision, input_hash, fetched, sum(1 for _ in document.blocks))
+        return None
     request = _build_request(job, attempt, document, fetched.payloads)
     # Документ больше не нужен: тексты блоков уже в запросе.
     del document
+    run_input = RunInput(
+        input_hash=input_hash,
+        contract_version=CONTRACT_VERSION,
+        provider=_settings.analysis_provider,
+        decision=decision,
+        stats=full_run_stats(
+            fetched.segments,
+            fetched.snapshots,
+            blocks=len(request.document.blocks),
+            checked=sum(1 for block in request.document.blocks if block.editable),
+        ),
+        delta=await _delta(job, decision, fetched),
+    )
     await _store_payload(job.id, attempt, "request", lambda: encode_request(request))
 
     started_at = time.perf_counter()
@@ -248,8 +281,87 @@ async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
         run=run,
         snapshots=fetched.snapshots,
         job_sources=job_sources,
+        run_input=run_input,
     )
     return None
+
+
+async def _decide(
+    job: _StartedJob, document_hash: str, fetched: _FetchedSources
+) -> tuple[ReuseDecision, str]:
+    input_hash = analysis_input_hash(
+        contract_version=CONTRACT_VERSION,
+        provider=_settings.analysis_provider,
+        document_hash=document_hash,
+        sources=[
+            (payload.name, snapshot.content_hash)
+            for payload, snapshot in zip(fetched.payloads, fetched.snapshots, strict=True)
+        ],
+    )
+    mode = IncrementalMode(_settings.analysis_incremental_mode)
+    baseline = None
+    if mode is not IncrementalMode.OFF:
+        # Прошлая задача нужна и при strategy=full: по ней считается доля изменений.
+        async with uow_factory() as uow:
+            baseline = await uow.jobs.find_reuse_baseline(job.document_id, job.id)
+    decision = decide_reuse(
+        mode=mode,
+        strategy=AnalysisStrategy(job.strategy),
+        input_hash=input_hash,
+        baseline=baseline,
+        failed_sources=len(fetched.failed),
+    )
+    logger.info(
+        "Анализ v2: решение о переносе результата",
+        extra={
+            "job_id": str(job.id),
+            "reason": decision.reason.value,
+            "baseline_job_id": str(baseline.job_id) if baseline else None,
+        },
+    )
+    return decision, input_hash
+
+
+async def _carry_over(
+    job: _StartedJob,
+    decision: ReuseDecision,
+    input_hash: str,
+    fetched: _FetchedSources,
+    blocks: int,
+) -> None:
+    """Вход совпал с прошлой полной задачей: её результат переносится без вызова ML."""
+    assert decision.baseline is not None
+    logger.info(
+        "Анализ v2: перенесён результат прошлой задачи",
+        extra={"job_id": str(job.id), "baseline_job_id": str(decision.baseline.job_id)},
+    )
+    await finish(
+        job.id,
+        AnalysisJobStatusVO.SUCCESS,
+        source_ids=fetched.ids,
+        snapshots=fetched.snapshots,
+        job_sources=_numbered(fetched.records),
+        run_input=RunInput(
+            input_hash=input_hash,
+            contract_version=CONTRACT_VERSION,
+            provider=_settings.analysis_provider,
+            decision=decision,
+            stats=reused_run_stats(fetched.segments, fetched.snapshots, blocks),
+        ),
+        carry_from=decision.baseline.job_id,
+    )
+
+
+async def _delta(
+    job: _StartedJob, decision: ReuseDecision, fetched: _FetchedSources
+) -> DeltaSummary | None:
+    if decision.baseline is None or _settings.analysis_incremental_mode != IncrementalMode.DELTA:
+        return None
+    async with uow_factory() as uow:
+        baseline_sources = await uow.snapshots.list_job_sources(decision.baseline.job_id)
+    return await delta_against(
+        get_storage(), baseline_sources, fetched.snapshots, fetched.segments, job.id
+    )
 
 
 def _located_sources(
@@ -325,15 +437,20 @@ async def _start(job_id: uuid.UUID, source_ids: Sequence[str], attempt: int) -> 
             sources=tuple(refs),
             unavailable=tuple(unavailable),
             unavailable_records=tuple(unavailable_records),
+            strategy=job.strategy,
         )
         await uow.commit()
     return started
 
 
-async def _load_document(job: _StartedJob) -> DocumentInput:
-    """Блоки строятся из файла на каждую попытку: одна задача на документ, разбор — один."""
+async def _load_document(job: _StartedJob) -> tuple[DocumentInput, str]:
+    """Блоки строятся из файла на каждую попытку: одна задача на документ, разбор — один.
+
+    sha256 файла считается от уже скачанных байтов: отдельная колонка у документа не нужна.
+    """
     try:
         raw = await get_storage().download(job.storage_key)
+        document_hash = hashlib.sha256(raw).hexdigest()
         parsed = (await get_document_layout_reader().read(job.storage_key, raw)).document
     except SoftTimeLimitExceeded:
         raise
@@ -341,13 +458,14 @@ async def _load_document(job: _StartedJob) -> DocumentInput:
         raise _JobFailed(
             "DOCUMENT_PARSE_ERROR", f"Не удалось разобрать документ: {type(exc).__name__}"
         ) from exc
-    return DocumentInput(
+    document = DocumentInput(
         id=job.document_id,
         name=job.document_name,
         format=job.document_format,
         plain_text=parsed.plain_text,
         blocks=parsed.blocks,
     )
+    return document, document_hash
 
 
 async def _attach_geometry(
@@ -428,8 +546,10 @@ async def _fetch_sources(refs: Sequence[SourceRef], project_id: uuid.UUID) -> _F
         fetched.ids.append(ref.id)
         # Снимок считается от того же текста, что уходит в запрос: цитаты модели
         # относятся именно к нему.
-        snapshot = SnapshotDraft.of(project_id, result.text)
+        segments = segment_fingerprints(result.text)
+        snapshot = SnapshotDraft.from_segments(project_id, result.text, segments)
         fetched.snapshots.append(snapshot)
+        fetched.segments.append(segments)
         fetched.records.append(
             JobSourceRecord(
                 position=0,
@@ -630,8 +750,14 @@ async def finish(
     run: PipelineRunSummary | None = None,
     snapshots: Sequence[SnapshotDraft] = (),
     job_sources: Sequence[JobSourceRecord] = (),
+    run_input: RunInput | None = None,
+    carry_from: uuid.UUID | None = None,
 ) -> bool:
-    """Записать результат одной транзакцией. False — задача уже не активна, ничего не записано."""
+    """Записать результат одной транзакцией. False — задача уже не активна, ничего не записано.
+
+    carry_from: вместо drafts и flags копируется результат этой задачи вместе с решениями
+    пользователя.
+    """
     async with uow_factory() as uow:
         job = await uow.jobs.lock_if_active(job_id)
         if job is None:
@@ -643,14 +769,22 @@ async def finish(
         document = await uow.documents.get_by_id(job.document_id)
         if document is None:
             return False
-        if run is not None:
+        if carry_from is not None:
+            await uow.jobs.record_reuse(job, carry_from)
+        elif run is not None:
             await uow.jobs.record_pipeline_run(job, run)
+        if run_input is not None:
+            await uow.jobs.record_input(job, run_input)
         # Снимки пишутся первыми: основания правок и флагов ссылаются на их id.
         evidence_sources: dict[int, EvidenceSource] = {}
         if job_sources:
             snapshot_ids = await uow.snapshots.ensure_snapshots(distinct_drafts(snapshots))
             await uow.snapshots.add_job_sources(job.id, job_sources, snapshot_ids)
             evidence_sources = evidence_sources_of(job_sources, snapshot_ids)
+        suggestions_written, flags_written = len(drafts), len(flags)
+        if carry_from is not None:
+            suggestions_written = await uow.suggestions.carry_over(carry_from, job.id)
+            flags_written = await uow.flags.carry_over(carry_from, job.id)
         if drafts:
             sources = await uow.sources.get_many_by_ids(list(source_ids))
             await uow.suggestions.bulk_create(
@@ -683,8 +817,9 @@ async def finish(
         extra={
             "job_id": str(job_id),
             "status": status.value,
-            "suggestions": len(drafts),
-            "flags": len(flags),
+            "suggestions": suggestions_written,
+            "flags": flags_written,
+            "carried_from": str(carry_from) if carry_from else None,
         },
     )
     return True

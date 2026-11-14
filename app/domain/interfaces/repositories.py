@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, TypedDict
 
+from app.domain.analysis_reuse import AnalysisStrategy, Baseline, RunInput
 from app.domain.interfaces.user_repository import IUserRepository  # noqa: F401
 from app.domain.pipeline_run import PipelineRunSummary
 from app.domain.source_snapshot import (
@@ -272,6 +273,11 @@ class IAnalysisFlagRepository(ABC):
     async def bulk_create(self, flags: Sequence[AnalysisFlag]) -> None: ...
 
     @abstractmethod
+    async def carry_over(self, from_job_id: uuid.UUID, to_job_id: uuid.UUID) -> int:
+        """Скопировать результат прошлой задачи в новую вместе с решениями; число строк."""
+        ...
+
+    @abstractmethod
     async def get_by_id(self, flag_id: uuid.UUID) -> AnalysisFlag | None: ...
 
     @abstractmethod
@@ -376,6 +382,11 @@ class ISuggestionRepository(ABC):
     async def bulk_create(self, suggestions: list[Suggestion]) -> list[Suggestion]: ...
 
     @abstractmethod
+    async def carry_over(self, from_job_id: uuid.UUID, to_job_id: uuid.UUID) -> int:
+        """Скопировать результат прошлой задачи в новую вместе с решениями и связями с источниками; число строк."""
+        ...
+
+    @abstractmethod
     async def update_status(
         self,
         suggestion: Suggestion,
@@ -477,6 +488,7 @@ class IAnalysisJobRepository(ABC):
         job_id: uuid.UUID | None = None,
         status: AnalysisJobStatusVO = AnalysisJobStatusVO.PENDING,
         idempotency_key: str | None = None,
+        strategy: AnalysisStrategy = AnalysisStrategy.AUTO,
     ) -> AnalysisJob: ...
 
     @abstractmethod
@@ -499,6 +511,23 @@ class IAnalysisJobRepository(ABC):
     @abstractmethod
     async def record_pipeline_run(self, job: AnalysisJob, run: PipelineRunSummary) -> None:
         """Сохранить сводку вызова ML вместе с задачей; фиксация — на вызывающем."""
+        ...
+
+    @abstractmethod
+    async def find_reuse_baseline(
+        self, document_id: uuid.UUID, exclude_job_id: uuid.UUID
+    ) -> Baseline | None:
+        """Последняя полная задача документа с хэшем входа: success без упавших блоков."""
+        ...
+
+    @abstractmethod
+    async def record_input(self, job: AnalysisJob, run_input: RunInput) -> None:
+        """Хэш входа, решение о переносе и объём отправленного в ML вместе с задачей."""
+        ...
+
+    @abstractmethod
+    async def record_reuse(self, job: AnalysisJob, baseline_job_id: uuid.UUID) -> None:
+        """Сводка перенесённого результата: счётчики блоков и оснований прошлой задачи."""
         ...
 
     @abstractmethod

@@ -13,6 +13,42 @@ class AnalysisJobCreateRequest(BaseModel):
     """Тело POST /analysis-jobs. force нужен только для документа в статусе ready."""
 
     force: bool = False
+    strategy: Literal["auto", "full"] = Field(
+        default="auto",
+        description=(
+            "auto переносит результат прошлой полной задачи, если вход анализа не изменился; "
+            "full всегда вызывает ML-конвейер"
+        ),
+    )
+
+
+class AnalysisIncrementalInfo(BaseModel):
+    """Как задача получила результат: вызовом ML или переносом из прошлой задачи."""
+
+    mode: Literal["reused", "full"]
+    reason: str = Field(
+        description=(
+            "reused, mode_off, strategy_full, sources_failed, no_baseline или input_changed"
+        )
+    )
+    baseline_job_id: uuid.UUID | None = None
+    changed_share: float | None = Field(
+        default=None, description="Доля символов источников в новых сегментах"
+    )
+    segments_added: int | None = None
+    segments_removed: int | None = None
+
+
+class AnalysisRunStats(BaseModel):
+    """Объём входа и отправленного в ML; в harness счётчики вызовов модели, если они есть."""
+
+    segments_total: int
+    segments_sent: int
+    chars_total: int
+    chars_sent: int
+    blocks_total: int
+    blocks_checked: int
+    harness: dict[str, float] | None = None
 
 
 class AnalysisJobResponse(BaseModel):
@@ -32,7 +68,12 @@ class AnalysisJobResponse(BaseModel):
     failed_blocks: int | None = Field(
         default=None, description="Сколько блоков конвейер не смог проверить; None — неизвестно"
     )
-    model_config = {"from_attributes": True}
+    strategy: Literal["auto", "full"] = "auto"
+    incremental: AnalysisIncrementalInfo | None = Field(
+        default=None, validation_alias="incremental_view"
+    )
+    run_stats: AnalysisRunStats | None = Field(default=None, validation_alias="run_stats_view")
+    model_config = {"from_attributes": True, "populate_by_name": True}
 
 
 class AnalysisJobConflictResponse(BaseModel):
@@ -51,6 +92,13 @@ class BulkAnalysisRequest(BaseModel):
 
     document_ids: list[uuid.UUID] | None = Field(default=None, max_length=500)
     force: bool = False
+    strategy: Literal["auto", "full"] = Field(
+        default="auto",
+        description=(
+            "auto переносит результат прошлой полной задачи, если вход анализа не изменился; "
+            "full всегда вызывает ML-конвейер"
+        ),
+    )
 
 
 class BulkJobResult(BaseModel):

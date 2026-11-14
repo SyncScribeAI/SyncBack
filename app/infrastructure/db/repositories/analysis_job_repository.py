@@ -10,10 +10,11 @@ import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.analysis_reuse import AnalysisStrategy, Baseline, RunInput
 from app.domain.exceptions import AnalysisJobConflictError
 from app.domain.interfaces.repositories import IAnalysisJobRepository
 from app.domain.lifecycle import AnalysisJobLifecycle
@@ -120,6 +121,7 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         job_id: uuid.UUID | None = None,
         status: AnalysisJobStatusVO = AnalysisJobStatusVO.PENDING,
         idempotency_key: str | None = None,
+        strategy: AnalysisStrategy = AnalysisStrategy.AUTO,
     ) -> AnalysisJob:
         """Фабричный метод: создаёт ORM-объект AnalysisJob внутри репозитория.
 
@@ -141,6 +143,7 @@ class AnalysisJobRepository(IAnalysisJobRepository):
             document_id=document.id,
             status=_status_to_orm(status),
             idempotency_key=idempotency_key,
+            strategy=strategy.value,
         )
         try:
             async with self._session.begin_nested():
@@ -195,6 +198,47 @@ class AnalysisJobRepository(IAnalysisJobRepository):
         }
         job.checked_blocks = run.checked_blocks
         job.failed_blocks = run.failed_blocks
+
+    async def find_reuse_baseline(
+        self, document_id: uuid.UUID, exclude_job_id: uuid.UUID
+    ) -> Baseline | None:
+        # partial_success и упавшие блоки исключены: их результат неполон, и перенос
+        # закрепил бы пропуски. Поиск идёт по ix_analysis_jobs_doc_latest.
+        row = (
+            await self._session.execute(
+                select(AnalysisJob.id, AnalysisJob.input_hash)
+                .where(
+                    AnalysisJob.document_id == document_id,
+                    AnalysisJob.id != exclude_job_id,
+                    AnalysisJob.status == AnalysisJobStatus.SUCCESS,
+                    AnalysisJob.partial_success.is_(False),
+                    or_(AnalysisJob.failed_blocks.is_(None), AnalysisJob.failed_blocks == 0),
+                    AnalysisJob.input_hash.is_not(None),
+                )
+                .order_by(AnalysisJob.created_at.desc(), AnalysisJob.id.desc())
+                .limit(1)
+            )
+        ).first()
+        if row is None or row.input_hash is None:
+            return None
+        return Baseline(job_id=row.id, input_hash=row.input_hash)
+
+    async def record_input(self, job: AnalysisJob, run_input: RunInput) -> None:
+        job.input_hash = run_input.input_hash
+        meta = dict(job.pipeline_meta or {})
+        meta.setdefault("contract_version", run_input.contract_version)
+        meta.setdefault("provider", run_input.provider)
+        meta["incremental"] = run_input.incremental_meta()
+        meta["run_stats"] = run_input.run_stats_meta(meta.get("meta"))
+        job.pipeline_meta = meta
+
+    async def record_reuse(self, job: AnalysisJob, baseline_job_id: uuid.UUID) -> None:
+        baseline = await self._session.get(AnalysisJob, baseline_job_id)
+        evidence = (baseline.pipeline_meta or {}).get("evidence") if baseline else None
+        job.request_id = None
+        job.pipeline_meta = {"meta": None, "evidence": evidence}
+        job.checked_blocks = baseline.checked_blocks if baseline else None
+        job.failed_blocks = baseline.failed_blocks if baseline else None
 
     async def update_status(
         self,

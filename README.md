@@ -262,7 +262,7 @@ ML_API_KEY=<общий ключ>
 
 - **Файл** — скачивается из хранилища и разбирается тем же парсером, что и документ.
 - **Заметка** — сохраняется как `.txt` и дальше обрабатывается как файл.
-- **Ссылка** — страница скачивается воркером в момент анализа. Разрешены только http и https; имя хоста разрешается в адреса, и каждый адрес проходит политику ссылок. Запрос уходит на проверенный IP с исходными Host и SNI (защита от DNS rebinding). Каждый редирект проверяется заново, не больше пяти. Ответ читается потоком и обрывается после `SOURCE_URL_MAX_BYTES` (5 МБ). HTML превращается в текст. Ответ 401 или 403 и форма входа после редиректа на другой хост дают отказ с просьбой сохранить страницу как файл.
+- **Ссылка** — страница скачивается воркером в момент анализа. Разрешены только http и https; имя хоста разрешается в адреса, и каждый адрес проходит политику ссылок. Запрос уходит на проверенный IP с исходными Host и SNI (защита от DNS rebinding). Каждый редирект проверяется заново, не больше пяти. Ответ читается потоком и обрывается после `SOURCE_URL_MAX_BYTES` (5 МБ). Тип содержимого выбирает разбор: HTML, Markdown, простой текст и DOCX идут теми же парсерами, что и файлы, неизвестный тип отклоняется. Кодировка определяется по BOM, заголовку Content-Type (если байты им декодируются), `<meta charset>`, строгому UTF-8 и запасной `SOURCE_HTML_FALLBACK_ENCODING`. Из HTML берётся основное содержимое (см. [Текст страницы](#текст-страницы)). Ответ 401 или 403 и форма входа после редиректа на другой хост дают отказ с просьбой сохранить страницу как файл.
 
 #### Внутренние порталы
 
@@ -271,6 +271,10 @@ ML_API_KEY=<общий ключ>
 Подсеть Docker (сеть `syncscribe-net`; Docker по умолчанию выдаёт адреса из 172.16.0.0/12 и 192.168.0.0/16, фактическую подсеть показывает `docker network inspect`) в `SOURCE_URL_ALLOWED_NETWORKS` вносить нельзя: тогда ссылка на имя из списка, разрешённое в адрес контейнера, дотянулась бы до сервисов compose. Имена сервисов (`ml`, `postgres`, `redis`, `seaweedfs`, `backend`) в список хостов тоже не вносятся.
 
 Свой удостоверяющий центр подключается через `SOURCE_URL_CA_BUNDLE`, файл лежит в каталоге `./certs`, который смонтирован в backend и worker. Проверка сертификата остаётся включённой. Сервисный токен портала задаётся JSON-файлом `SOURCE_URL_AUTH_HEADERS_FILE` вида `{"wiki.corp": {"Authorization": "Bearer …"}}`, лучше секретом compose. Заголовки уходят только на свой хост и снимаются при редиректе на другой. Вход через Kerberos и интерактивный SSO не поддерживается; такие страницы сохраняются из браузера и загружаются файлом.
+
+#### Текст страницы
+
+Корень содержимого выбирается по селектору хоста из `SOURCE_HTML_CONTENT_SELECTORS` (JSON, например `{"wiki.corp": "#main-content"}`; ключ с ведущей точкой подходит для поддоменов), затем по единственному `<main>` или `role="main"`, затем по единственному `<article>`, иначе берётся `<body>`. Внутри корня пропускаются nav, aside, form, button, dialog, шапка и подвал вне article и section, скрытые элементы и роли navigation, banner, contentinfo, complementary, search. Если после фильтра осталось меньше `SOURCE_HTML_MIN_KEPT_SHARE` текста страницы (0.1), разбирается весь `<body>`. Страница короче `SOURCE_HTML_MIN_CHARS` (200) со скриптами считается приложением на JavaScript и отклоняется с просьбой сохранить её как файл. Сохранённые из браузера `.html` и `.htm` загружаются как файловые источники и разбираются так же.
 
 `SOURCE_URL_ROBOTS`: `log` пишет запрет `robots.txt` в лог, `enforce` прерывает загрузку, `off` не запрашивает `robots.txt` вовсе. Проверить ссылку сразу после добавления можно через `POST /sources/{s}/check`: ручка загружает и разбирает источник и возвращает `{ok, chars, error}`, ничего не сохраняя.
 
@@ -475,7 +479,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 | LLM: подключение | `LLM_PROVIDER` (`stub` \| `openai_compatible`), `LLM_ENDPOINT`, `LLM_MODEL`, `LLM_AUTH` (`none` \| `bearer` \| `oauth_gigachat`), `LLM_API_KEY` | Какая модель и как к ней обращаться. Для `openai_compatible` обязательны адрес и модель, для авторизации кроме `none` — ключ |
 | LLM: OAuth и TLS | `LLM_OAUTH_URL`, `LLM_OAUTH_SCOPE`, `LLM_CA_BUNDLE`, `LLM_VERIFY_SSL` | Обмен ключа на токен; собственный корневой сертификат |
 | LLM: поведение | `LLM_TEMPERATURE` (0.1), `LLM_TIMEOUT_SECONDS` (60), `LLM_MAX_RETRIES` (3), `LLM_MAX_INPUT_CHARS` (200000) | Температура, таймаут запроса, повторы временных сбоев, лимит документа и источника в символах |
-| Источники по ссылке | `SOURCE_URL_ALLOWED_HOSTS`, `SOURCE_URL_ALLOWED_NETWORKS`, `SOURCE_URL_ALLOW_PUBLIC`, `SOURCE_URL_CA_BUNDLE`, `SOURCE_URL_AUTH_HEADERS_FILE`, `SOURCE_URL_USER_AGENT`, `SOURCE_URL_ROBOTS`, `SOURCE_URL_MAX_BYTES`, `SOURCE_URL_CONNECT_TIMEOUT_SECONDS`, `SOURCE_URL_READ_TIMEOUT_SECONDS` | Белый список внутренних порталов, TLS, сервисные заголовки, robots.txt и лимиты загрузки (см. [Внутренние порталы](#внутренние-порталы)) |
+| Источники по ссылке | `SOURCE_URL_ALLOWED_HOSTS`, `SOURCE_URL_ALLOWED_NETWORKS`, `SOURCE_URL_ALLOW_PUBLIC`, `SOURCE_URL_CA_BUNDLE`, `SOURCE_URL_AUTH_HEADERS_FILE`, `SOURCE_URL_USER_AGENT`, `SOURCE_URL_ROBOTS`, `SOURCE_URL_MAX_BYTES`, `SOURCE_URL_CONNECT_TIMEOUT_SECONDS`, `SOURCE_URL_READ_TIMEOUT_SECONDS`, `SOURCE_HTML_CONTENT_SELECTORS`, `SOURCE_HTML_MIN_KEPT_SHARE`, `SOURCE_HTML_MIN_CHARS`, `SOURCE_HTML_FALLBACK_ENCODING` | Белый список внутренних порталов, TLS, сервисные заголовки, robots.txt, лимиты загрузки и выделение текста страницы (см. [Внутренние порталы](#внутренние-порталы)) |
 | Логи | `LOG_LEVEL`, `LOG_FORMAT` (`json` \| `text`) | Структурированные логи |
 
 ## Тесты и CI

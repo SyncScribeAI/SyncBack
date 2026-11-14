@@ -5,12 +5,14 @@ from pathlib import Path
 from app.domain.exceptions import UnsupportedFormatError
 from app.domain.interfaces.document_parser import DocumentParser, ParsedDocument
 from app.infrastructure.parsers.docx_parser import DocxParser
+from app.infrastructure.parsers.html_parser import HtmlParser
 from app.infrastructure.parsers.markdown_parser import MarkdownParser
 from app.infrastructure.parsers.txt_parser import TxtParser
 
 # Поддерживаемые форматы:
 #   .docx  — Office OpenXML (python-docx)
 #   .md / .markdown — Markdown
+#   .html / .htm — сохранённая страница, только как источник (основное содержимое)
 #   .txt и всё остальное — plain text
 #
 # .doc (OLE2 / Word 97-2003) НЕ поддерживается: python-docx работает только
@@ -33,6 +35,8 @@ class DocumentParserRegistry:
         ".docx": "_docx_parser",
         ".md": "_markdown_parser",
         ".markdown": "_markdown_parser",
+        ".html": "_html_parser",
+        ".htm": "_html_parser",
     }
     # Отсутствующие суффиксы → fallback на TxtParser.
 
@@ -40,6 +44,7 @@ class DocumentParserRegistry:
         self._docx_parser = DocxParser()
         self._txt_parser = TxtParser()
         self._markdown_parser = MarkdownParser()
+        self._html_parser = HtmlParser()
 
     def _get_parser_for_suffix(self, suffix: str) -> str | None:
         """Имя атрибута парсера для суффикса или None, если формат не поддерживается."""

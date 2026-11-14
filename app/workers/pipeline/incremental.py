@@ -1,4 +1,4 @@
-"""Вход задачи анализа для решения о переносе: хэш, объём и изменения источников.
+"""Вход задачи анализа для переноса и выборочной проверки: объём, изменения, запрос.
 
 Модуль собирает данные, а решение принимает домен (app.domain.analysis_reuse). Отпечатки
 прошлого входа читаются из .fp-файлов снимков; снимки с тем же хэшем, что у текущего
@@ -10,13 +10,12 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Sequence
-from itertools import chain
 
 from celery.exceptions import SoftTimeLimitExceeded
 
 from app.domain.analysis_reuse import DeltaSummary, RunStats
 from app.domain.interfaces.file_storage import FileStorage
-from app.domain.services.source_differ import diff_fingerprints
+from app.domain.services.delta_request import BaselineFingerprints, summarize_delta
 from app.domain.source_snapshot import (
     JobSourceSnapshot,
     SnapshotDraft,
@@ -59,30 +58,32 @@ def reused_run_stats(
     )
 
 
-async def delta_against(
+async def load_baseline_fingerprints(
     storage: FileStorage,
     baseline_sources: Sequence[JobSourceSnapshot],
     snapshots: Sequence[SnapshotDraft],
-    segments: Sequence[Segments],
     job_id: uuid.UUID,
-) -> DeltaSummary | None:
-    """Изменения входа относительно прошлой задачи; None, если отпечатки не прочитались.
+) -> BaselineFingerprints | None:
+    """None, если отпечатки не прочитались; вызывающий тогда идёт полным анализом.
 
-    Сбой здесь не влияет на анализ: это измерение для выборочной отправки, а не её часть.
+    Снимки с тем же хэшем, что у текущего входа, не скачиваются: их отпечатки в памяти.
     """
     current = {snapshot.content_hash: snapshot for snapshot in snapshots}
     base: set[int] = set()
+    by_snapshot: dict[str, Sequence[int]] = {}
     try:
         for source in baseline_sources:
             snapshot = source.snapshot
-            if snapshot is None:
+            if snapshot is None or str(snapshot.id) in by_snapshot:
                 continue
             same = current.get(snapshot.content_hash)
             if same is not None:
-                base.update(same.fingerprints)
-                continue
-            raw = await storage.download(fingerprints_storage_key(snapshot.storage_key))
-            base.update(unpack_fingerprints(raw))
+                fingerprints: Sequence[int] = same.fingerprints
+            else:
+                raw = await storage.download(fingerprints_storage_key(snapshot.storage_key))
+                fingerprints = unpack_fingerprints(raw)
+            by_snapshot[str(snapshot.id)] = fingerprints
+            base.update(fingerprints)
     except SoftTimeLimitExceeded:
         raise
     except Exception:
@@ -92,9 +93,21 @@ async def delta_against(
             extra={"job_id": str(job_id)},
         )
         return None
-    delta = diff_fingerprints(frozenset(base), chain.from_iterable(segments))
-    return DeltaSummary(
-        changed_share=delta.changed_share,
-        segments_added=len(delta.added),
-        segments_removed=len(delta.removed_fingerprints),
-    )
+    return BaselineFingerprints(all=frozenset(base), by_snapshot=by_snapshot)
+
+
+async def delta_against(
+    storage: FileStorage,
+    baseline_sources: Sequence[JobSourceSnapshot],
+    snapshots: Sequence[SnapshotDraft],
+    segments: Sequence[Segments],
+    job_id: uuid.UUID,
+) -> DeltaSummary | None:
+    """Изменения входа относительно прошлой задачи; None, если отпечатки не прочитались.
+
+    Сбой здесь не влияет на анализ: при полном прогоне это только измерение для meta.
+    """
+    fingerprints = await load_baseline_fingerprints(storage, baseline_sources, snapshots, job_id)
+    if fingerprints is None:
+        return None
+    return summarize_delta(fingerprints.all, segments)

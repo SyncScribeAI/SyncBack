@@ -121,6 +121,17 @@ class SuggestionResponse(BaseModel):
         default=None,
         description="Только у PDF: где правка на страницах оригинала; None у других форматов",
     )
+    carried_from_id: uuid.UUID | None = Field(
+        default=None,
+        description="Правка перенесена из прошлого анализа вместе с решением; id исходной правки",
+    )
+    stale: bool = Field(
+        default=False,
+        description=(
+            "Решение перенесено из прошлого анализа, а основание правки с тех пор изменилось"
+            " в источнике; решение стоит пересмотреть"
+        ),
+    )
     status: Literal["pending", "accepted", "rejected"]
     # None — решение ещё не принято или сброшено.
     decided_by: uuid.UUID | None = None
@@ -139,6 +150,11 @@ class SuggestionResponse(BaseModel):
     @classmethod
     def _origin_before_insert(cls, value: object) -> object:
         return "model" if value is None else value
+
+    @field_validator("stale", mode="before")
+    @classmethod
+    def _stale_before_insert(cls, value: object) -> object:
+        return False if value is None else value
 
 
 # ---------------------------------------------------------------------------

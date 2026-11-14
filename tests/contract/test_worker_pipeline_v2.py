@@ -579,6 +579,9 @@ async def test_suggestions_are_bound_to_blocks_and_keep_pipeline_order(
 
     stored = await _job(sessionmaker, job_id)
     assert stored.request_id == f"{job_id}:0"
+    assert stored.pipeline_meta is not None
+    document_hash = stored.pipeline_meta["incremental"]["document_hash"]
+    assert len(document_hash) == 64
     assert stored.pipeline_meta == {
         "contract_version": "2.0",
         "provider": v2._settings.analysis_provider,
@@ -589,7 +592,14 @@ async def test_suggestions_are_bound_to_blocks_and_keep_pipeline_order(
             "evidence_not_found": 0,
             "evidence_unparsed": 0,
         },
-        "incremental": {"mode": "full", "reason": "no_baseline", "baseline_job_id": None},
+        "incremental": {
+            "mode": "full",
+            "reason": "no_baseline",
+            "baseline_job_id": None,
+            "chain_length": 0,
+            "fallback_reason": "no_baseline",
+            "document_hash": document_hash,
+        },
         # Один источник «Решения: срок ответа 5 рабочих дней (A)»: один сегмент, 39 символов.
         "run_stats": {
             "segments_total": 1,

@@ -38,9 +38,10 @@ import asyncio
 import functools
 import hashlib
 import logging
+import random
 import time
 import uuid
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Collection, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -51,12 +52,16 @@ from celery.exceptions import SoftTimeLimitExceeded
 from app.core.config import get_settings
 from app.domain.analysis_reuse import (
     AnalysisStrategy,
+    DeltaFallback,
+    DeltaPolicy,
     DeltaSummary,
     IncrementalMode,
     ReuseDecision,
+    ReuseReason,
     RunInput,
     analysis_input_hash,
     decide_reuse,
+    delta_precheck,
 )
 from app.domain.document_geometry import highlight_span
 from app.domain.evidence import EvidenceSource, evidence_sources_of
@@ -68,15 +73,19 @@ from app.domain.exceptions import (
 from app.domain.interfaces.document_analyzer import (
     AnalysisRequest,
     AnalysisResult,
+    AnalysisStatus,
     DocumentAnalyzer,
     SourcePayload,
 )
 from app.domain.interfaces.file_storage import UploadContent
 from app.domain.interfaces.source_connector import SourceRef
-from app.domain.lifecycle import AnalysisJobLifecycle
+from app.domain.lifecycle import AnalysisJobLifecycle, JobOutcome
 from app.domain.pipeline_run import PipelineRunSummary, summarize_run
 from app.domain.services.analysis_request_builder import DocumentInput, build_analysis_request
 from app.domain.services.analysis_result_mapper import FlagDraft, SuggestionDraft, map_result
+from app.domain.services.delta_merge import MergePlan, audit_diff, plan_merge
+from app.domain.services.delta_request import DeltaRequest, add_on_unchanged, build_delta_request
+from app.domain.services.delta_selection import DeltaLimits
 from app.domain.services.evidence_locator import (
     EvidenceLocator,
     LocatedSource,
@@ -100,7 +109,12 @@ from app.infrastructure.ml_pipeline.factory import analysis_limits, get_document
 from app.infrastructure.ml_pipeline.schemas import CONTRACT_VERSION, encode_request
 from app.workers.celery_app import celery_app
 from app.workers.pipeline.flag_drafts import to_flags
-from app.workers.pipeline.incremental import delta_against, full_run_stats, reused_run_stats
+from app.workers.pipeline.incremental import (
+    delta_against,
+    full_run_stats,
+    load_baseline_fingerprints,
+    reused_run_stats,
+)
 from app.workers.pipeline.suggestion_drafts import to_suggestions
 from app.workers.tasks.job_completion import complete_job
 from app.workers.tasks.runtime import (
@@ -218,24 +232,55 @@ async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
     await _store_snapshots(job.id, fetched.snapshots)
     decision, input_hash = await _decide(job, document_hash, fetched)
     if decision.reuse and decision.baseline is not None:
-        await _carry_over(job, decision, input_hash, fetched, sum(1 for _ in document.blocks))
+        await _carry_over(
+            job, decision, input_hash, document_hash, fetched, sum(1 for _ in document.blocks)
+        )
         return None
-    request = _build_request(job, attempt, document, fetched.payloads)
-    # Документ больше не нужен: тексты блоков уже в запросе.
-    del document
+    delta = await _plan_delta(job, decision, document, document_hash, fetched)
+    delta_request = delta if isinstance(delta, DeltaRequest) else None
+    fallback = delta if isinstance(delta, DeltaFallback) else None
     run_input = RunInput(
         input_hash=input_hash,
         contract_version=CONTRACT_VERSION,
         provider=_settings.analysis_provider,
         decision=decision,
-        stats=full_run_stats(
-            fetched.segments,
-            fetched.snapshots,
-            blocks=len(request.document.blocks),
-            checked=sum(1 for block in request.document.blocks if block.editable),
-        ),
-        delta=await _delta(job, decision, fetched),
+        stats=reused_run_stats(fetched.segments, fetched.snapshots, 0),
+        document_hash=document_hash,
+        fallback=fallback,
     )
+    if delta_request is not None and not delta_request.calls_model:
+        # Источник только потерял текст: модели нечего показать, перенос сам отметит
+        # правки, основание которых исчезло.
+        blocks = {block.ref: block.text_in(document.plain_text) for block in document.blocks}
+        await _finish_delta(job, delta_request, run_input, fetched, (), (), None, blocks)
+        return None
+    audit = delta_request is not None and random.random() < _settings.analysis_delta_audit_rate
+    full_request = _build_request(job, attempt, document, fetched.payloads) if audit else None
+    if delta_request is None:
+        request = full_request or _build_request(job, attempt, document, fetched.payloads)
+        run_input = replace(
+            run_input,
+            stats=full_run_stats(
+                fetched.segments,
+                fetched.snapshots,
+                blocks=len(request.document.blocks),
+                checked=sum(1 for block in request.document.blocks if block.editable),
+            ),
+            delta=await _delta(job, decision, fetched),
+        )
+    else:
+        request = _build_request(
+            job, attempt, document, delta_request.sources, delta_request.selected.refs
+        )
+        run_input = replace(
+            run_input,
+            stats=delta_request.stats,
+            delta=delta_request.summary,
+            selective=True,
+            selection=delta_request.selected.as_meta(),
+        )
+    # Документ больше не нужен: тексты блоков уже в запросе.
+    del document
     await _store_payload(job.id, attempt, "request", lambda: encode_request(request))
 
     started_at = time.perf_counter()
@@ -257,19 +302,16 @@ async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
     if outcome.status is AnalysisJobStatusVO.FAILED:
         raise _JobFailed(outcome.error_code or "LLM_UNAVAILABLE", outcome.error_message or "", run)
 
-    drafts, flags = _map(job.id, attempt, result, request)
     job_sources = _numbered(fetched.records)
-    drafts, flags, counters = attach_evidence(
-        drafts,
-        flags,
-        EvidenceLocator(
-            _located_sources(fetched, job_sources), _settings.analysis_evidence_min_containment
-        ),
-    )
-    run = replace(run, evidence=counters.as_meta())
-    logger.info("Анализ v2: основания правок", extra={"job_id": str(job.id), **counters.as_meta()})
-    if job.document_format == DocumentFormatVO.PDF.value:
-        drafts, flags = await _attach_geometry(job, drafts, flags)
+    drafts, flags, run = await _located_result(job, attempt, result, request, fetched, run)
+    if delta_request is not None:
+        blocks = {block.ref: block.text for block in request.document.blocks}
+        delta_blocks = await _finish_delta(
+            job, delta_request, run_input, fetched, drafts, flags, run, blocks, outcome
+        )
+        if full_request is not None and delta_blocks is not None:
+            await _audit(job, attempt, full_request, fetched, delta_blocks)
+        return None
     await finish(
         job.id,
         outcome.status,
@@ -284,6 +326,218 @@ async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
         run_input=run_input,
     )
     return None
+
+
+async def _located_result(
+    job: _StartedJob,
+    attempt: int,
+    result: AnalysisResult,
+    request: AnalysisRequest,
+    fetched: _FetchedSources,
+    run: PipelineRunSummary,
+) -> tuple[list[SuggestionDraft], list[FlagDraft], PipelineRunSummary]:
+    """Черновики правок и флагов с основаниями и, у PDF, с геометрией на страницах."""
+    drafts, flags = _map(job.id, attempt, result, request)
+    drafts, flags, counters = attach_evidence(
+        drafts,
+        flags,
+        EvidenceLocator(
+            _located_sources(fetched, _numbered(fetched.records)),
+            _settings.analysis_evidence_min_containment,
+        ),
+    )
+    run = replace(run, evidence=counters.as_meta())
+    logger.info("Анализ v2: основания правок", extra={"job_id": str(job.id), **counters.as_meta()})
+    if job.document_format == DocumentFormatVO.PDF.value:
+        drafts, flags = await _attach_geometry(job, drafts, flags)
+    return drafts, flags, run
+
+
+async def _plan_delta(
+    job: _StartedJob,
+    decision: ReuseDecision,
+    document: DocumentInput,
+    document_hash: str,
+    fetched: _FetchedSources,
+) -> DeltaRequest | DeltaFallback | None:
+    """Выборочный запрос, причина полного анализа или None, если выбора не было.
+
+    None означает, что полный анализ задан самим решением о переносе: нет baseline,
+    strategy=full, режим off или упал источник.
+    """
+    baseline = decision.baseline
+    if decision.reason is not ReuseReason.INPUT_CHANGED or baseline is None:
+        return None
+    policy = _delta_policy()
+    fallback = delta_precheck(
+        baseline,
+        mode=IncrementalMode(_settings.analysis_incremental_mode),
+        document_hash=document_hash,
+        contract_version=CONTRACT_VERSION,
+        provider=_settings.analysis_provider,
+        policy=policy,
+    )
+    if fallback is None:
+        async with uow_factory() as uow:
+            baseline_sources = await uow.snapshots.list_job_sources(baseline.job_id)
+            suggestions = await uow.suggestions.baseline_rows(baseline.job_id)
+            flags = await uow.flags.baseline_rows(baseline.job_id)
+        fingerprints = await load_baseline_fingerprints(
+            get_storage(), baseline_sources, fetched.snapshots, job.id
+        )
+        if fingerprints is None:
+            fallback = DeltaFallback.FINGERPRINTS_UNAVAILABLE
+        else:
+            planned = build_delta_request(
+                baseline=baseline,
+                fingerprints=fingerprints,
+                document=document,
+                payloads=fetched.payloads,
+                segments=fetched.segments,
+                suggestions=suggestions,
+                flags=flags,
+                policy=policy,
+                limits=_delta_limits(),
+            )
+            if isinstance(planned, DeltaRequest):
+                logger.info(
+                    "Анализ v2: выборочная проверка блоков",
+                    extra={
+                        "job_id": str(job.id),
+                        "baseline_job_id": str(baseline.job_id),
+                        **planned.selected.as_meta(),
+                        "segments_sent": planned.stats.segments_sent,
+                        "segments_total": planned.stats.segments_total,
+                    },
+                )
+                return planned
+            fallback = planned
+    logger.info(
+        "Анализ v2: выборочная проверка заменена полным анализом",
+        extra={"job_id": str(job.id), "fallback_reason": fallback.value},
+    )
+    return fallback
+
+
+def _delta_policy() -> DeltaPolicy:
+    return DeltaPolicy(
+        max_changed_share=_settings.analysis_delta_max_changed_share,
+        max_blocks_share=_settings.analysis_delta_max_blocks_share,
+        max_chain=_settings.analysis_delta_max_chain,
+    )
+
+
+def _delta_limits() -> DeltaLimits:
+    return DeltaLimits(
+        blocks_per_segment=_settings.analysis_delta_blocks_per_segment,
+        score_threshold=_settings.analysis_delta_score_threshold,
+        rare_block_count=_settings.analysis_delta_rare_blocks,
+        context_segments=_settings.analysis_delta_context_segments,
+        support_segments=_settings.analysis_delta_support_segments,
+        stem_chars=_settings.analysis_delta_stem_chars,
+    )
+
+
+async def _finish_delta(
+    job: _StartedJob,
+    delta: DeltaRequest,
+    run_input: RunInput,
+    fetched: _FetchedSources,
+    drafts: Sequence[SuggestionDraft],
+    flags: Sequence[FlagDraft],
+    run: PipelineRunSummary | None,
+    blocks: Mapping[str, str],
+    outcome: JobOutcome | None = None,
+) -> set[str] | None:
+    """Свести ответ с прошлым результатом и записать задачу; блоки с правкой или флагом.
+
+    None, если задача уже не активна и ничего не записано.
+    """
+    job_sources = _numbered(fetched.records)
+    segments_by_position = {
+        record.position: segments
+        for record, segments in zip(
+            (record for record in job_sources if record.status is JobSourceStatus.FETCHED),
+            fetched.segments,
+            strict=True,
+        )
+    }
+    plan = plan_merge(
+        baseline_suggestions=delta.suggestions,
+        baseline_flags=delta.flags,
+        rechecked=delta.rechecked,
+        drafts=drafts,
+        flags=flags,
+        add_on_unchanged=add_on_unchanged(drafts, segments_by_position, delta.base),
+        changed=delta.changed,
+        blocks=blocks,
+    )
+    selection = {**delta.selected.as_meta(), **plan.as_meta()}
+    written = await finish(
+        job.id,
+        outcome.status if outcome else AnalysisJobStatusVO.SUCCESS,
+        outcome.error_code if outcome else None,
+        outcome.error_message if outcome else None,
+        drafts=plan.drafts,
+        flags=plan.flags,
+        source_ids=fetched.ids,
+        run=run,
+        snapshots=fetched.snapshots,
+        job_sources=job_sources,
+        run_input=replace(
+            run_input,
+            stats=delta.stats,
+            delta=delta.summary,
+            selective=True,
+            selection=selection,
+        ),
+        carry_from=delta.baseline.job_id,
+        merge=plan,
+    )
+    if not written:
+        return None
+    copied = set(plan.copy_suggestions)
+    copied_flags = set(plan.copy_flags)
+    found = {draft.block_ref for draft in plan.drafts} | {flag.block_ref for flag in plan.flags}
+    found.update(row.block_ref for row in delta.suggestions if row.id in copied and row.block_ref)
+    found.update(row.block_ref for row in delta.flags if row.id in copied_flags)
+    return found
+
+
+async def _audit(
+    job: _StartedJob,
+    attempt: int,
+    request: AnalysisRequest,
+    fetched: _FetchedSources,
+    delta_blocks: set[str],
+) -> None:
+    """Контрольный полный анализ того же входа после выборочной задачи.
+
+    Результат задачи уже записан и не меняется: расхождение по блокам пишется только в
+    meta, по нему настраиваются пороги отбора. Сбой аудита на задачу не влияет.
+    """
+    try:
+        result = await _get_analyzer().analyze(request)
+        if result.status is AnalysisStatus.FAILED:
+            return
+        run = _summarize(job.id, request, result)
+        drafts, flags, _ = await _located_result(job, attempt, result, request, fetched, run)
+        audit = audit_diff(
+            {draft.block_ref for draft in drafts} | {flag.block_ref for flag in flags},
+            delta_blocks,
+        )
+        async with uow_factory() as uow:
+            await uow.jobs.record_audit(job.id, audit)
+            await uow.commit()
+        logger.info("Анализ v2: аудит выборочной задачи", extra={"job_id": str(job.id), **audit})
+    except SoftTimeLimitExceeded:
+        raise
+    except Exception:
+        logger.warning(
+            "Анализ v2: аудит выборочной задачи не выполнен",
+            exc_info=True,
+            extra={"job_id": str(job.id)},
+        )
 
 
 async def _decide(
@@ -326,6 +580,7 @@ async def _carry_over(
     job: _StartedJob,
     decision: ReuseDecision,
     input_hash: str,
+    document_hash: str,
     fetched: _FetchedSources,
     blocks: int,
 ) -> None:
@@ -347,6 +602,7 @@ async def _carry_over(
             provider=_settings.analysis_provider,
             decision=decision,
             stats=reused_run_stats(fetched.segments, fetched.snapshots, blocks),
+            document_hash=document_hash,
         ),
         carry_from=decision.baseline.job_id,
     )
@@ -627,7 +883,11 @@ async def _store_snapshots(job_id: uuid.UUID, snapshots: Sequence[SnapshotDraft]
 
 
 def _build_request(
-    job: _StartedJob, attempt: int, document: DocumentInput, sources: Sequence[SourcePayload]
+    job: _StartedJob,
+    attempt: int,
+    document: DocumentInput,
+    sources: Sequence[SourcePayload],
+    editable: Collection[str] | None = None,
 ) -> AnalysisRequest:
     try:
         return build_analysis_request(
@@ -636,6 +896,7 @@ def _build_request(
             document=document,
             sources=sources,
             limits=analysis_limits(_settings),
+            editable=editable,
         )
     except LLMInputTooLargeError as exc:
         raise _JobFailed("LLM_INPUT_TOO_LARGE", str(exc)) from exc
@@ -752,11 +1013,13 @@ async def finish(
     job_sources: Sequence[JobSourceRecord] = (),
     run_input: RunInput | None = None,
     carry_from: uuid.UUID | None = None,
+    merge: MergePlan | None = None,
 ) -> bool:
     """Записать результат одной транзакцией. False — задача уже не активна, ничего не записано.
 
     carry_from: вместо drafts и flags копируется результат этой задачи вместе с решениями
-    пользователя.
+    пользователя. С merge копируются только выбранные им строки, а drafts и flags
+    записываются рядом: так выборочная задача получает полный результат.
     """
     async with uow_factory() as uow:
         job = await uow.jobs.lock_if_active(job_id)
@@ -769,7 +1032,7 @@ async def finish(
         document = await uow.documents.get_by_id(job.document_id)
         if document is None:
             return False
-        if carry_from is not None:
+        if carry_from is not None and run is None:
             await uow.jobs.record_reuse(job, carry_from)
         elif run is not None:
             await uow.jobs.record_pipeline_run(job, run)
@@ -782,7 +1045,12 @@ async def finish(
             await uow.snapshots.add_job_sources(job.id, job_sources, snapshot_ids)
             evidence_sources = evidence_sources_of(job_sources, snapshot_ids)
         suggestions_written, flags_written = len(drafts), len(flags)
-        if carry_from is not None:
+        if carry_from is not None and merge is not None:
+            suggestions_written += await uow.suggestions.carry_over(
+                carry_from, job.id, merge.copy_suggestions, list(merge.stale_suggestions)
+            )
+            flags_written += await uow.flags.carry_over(carry_from, job.id, merge.copy_flags)
+        elif carry_from is not None:
             suggestions_written = await uow.suggestions.carry_over(carry_from, job.id)
             flags_written = await uow.flags.carry_over(carry_from, job.id)
         if drafts:

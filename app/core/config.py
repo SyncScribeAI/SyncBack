@@ -150,10 +150,30 @@ class Settings(BaseSettings):
     # Доля слов цитаты, которая должна найтись в сегменте источника, чтобы сегмент считался
     # её основанием. [гипотеза] 0.6 уточняется по первым реальным прогонам.
     analysis_evidence_min_containment: float = Field(default=0.6, gt=0, le=1)
-    # Повторный анализ без изменений входа. off всегда вызывает ML; reuse переносит результат
-    # прошлой полной задачи, если вход совпал; delta делает то же и дополнительно считает
-    # изменённые сегменты источников (выборочная отправка появится в D2).
+    # Повторный анализ документа. off всегда вызывает ML полным запросом; reuse переносит
+    # результат прошлой полной задачи, если вход совпал; delta вдобавок при изменённых
+    # источниках проверяет заново только блоки, которых касаются изменения.
     analysis_incremental_mode: Literal["off", "reuse", "delta"] = "delta"
+    # Пределы выборочной проверки; за ними задача идёт полным анализом. [гипотеза] Значения
+    # уточняются по набору пар «база и изменение» на реальной модели.
+    analysis_delta_max_changed_share: float = Field(default=0.3, ge=0, le=1)
+    analysis_delta_max_blocks_share: float = Field(default=0.5, ge=0, le=1)
+    # Сколько выборочных задач подряд допускается после полного анализа.
+    analysis_delta_max_chain: int = Field(default=5, ge=0, le=100)
+    # Отбор блоков по изменённому сегменту: лучшие N по перекрытию слов и все с
+    # нормированной оценкой не ниже порога; редкое слово встречается не больше чем в
+    # rare_blocks блоках. [гипотеза]
+    analysis_delta_blocks_per_segment: int = Field(default=8, ge=1, le=200)
+    analysis_delta_score_threshold: float = Field(default=0.3, gt=0, le=1)
+    analysis_delta_rare_blocks: int = Field(default=2, ge=0, le=50)
+    # Длина основы слова при сравнении; заменяет морфологию без словаря. [гипотеза]
+    analysis_delta_stem_chars: int = Field(default=6, ge=3, le=32)
+    # Соседи изменённого сегмента с каждой стороны и опорные неизменённые сегменты на блок.
+    analysis_delta_context_segments: int = Field(default=2, ge=0, le=20)
+    analysis_delta_support_segments: int = Field(default=3, ge=0, le=50)
+    # Доля выборочных задач, после которых тот же вход проверяется полным анализом, а
+    # расхождение пишется в meta задачи. 0 отключает аудит: он удваивает вызовы модели.
+    analysis_delta_audit_rate: float = Field(default=0.0, ge=0, le=1)
     # Больше страниц PDF не разбирается: разбор держит общий замок PDFium, и один огромный
     # файл задержал бы все остальные.
     pdf_max_pages: int = Field(default=500, gt=0)

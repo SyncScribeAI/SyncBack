@@ -1,7 +1,7 @@
 """Решение о переносе результата прошлого анализа без вызова ML.
 
 Вход анализа описывается одним хэшем: версия контракта, провайдер, байты файла
-документа и снимки источников. Совпадение хэша с прошлой полной задачей того же
+документа и источники вместе с их идентичностью и снимками. Совпадение хэша с прошлой полной задачей того же
 документа означает, что модель получила бы тот же запрос, и её прошлый ответ можно
 перенести вместе с решениями пользователя.
 
@@ -59,6 +59,9 @@ class DeltaFallback(StrEnum):
     BLOCKS_SHARE = "blocks_share"
     # Новый текст источника не совпал ни с одним блоком: правка add возможна где угодно.
     NO_BLOCKS_MATCHED = "no_blocks_matched"
+    # Источник прошлой задачи удалён, и появился новый: основания перенесённых правок
+    # указывали бы на удалённый источник, даже если текст нового совпадает.
+    SOURCES_REPLACED = "sources_replaced"
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +119,20 @@ def delta_precheck(
     return None
 
 
+def sources_replaced_check(
+    baseline_ids: Iterable[uuid.UUID], current_ids: Iterable[uuid.UUID]
+) -> DeltaFallback | None:
+    """Пропажа и появление источников одновременно: перенос сохранил бы чужие основания.
+
+    Только удаление или только добавление выборочная проверка обрабатывает сама:
+    правки без основания помечаются, новый текст уходит в модель.
+    """
+    baseline, current = set(baseline_ids), set(current_ids)
+    if baseline - current and current - baseline:
+        return DeltaFallback.SOURCES_REPLACED
+    return None
+
+
 def delta_scope_check(
     *, changed_share: float, selected: int, checkable: int, policy: DeltaPolicy
 ) -> DeltaFallback | None:
@@ -142,14 +159,16 @@ def analysis_input_hash(
     contract_version: str,
     provider: str,
     document_hash: str,
-    sources: Iterable[tuple[str, str]],
+    sources: Iterable[tuple[str, str, str, str]],
 ) -> str:
-    """sha256 входа; пары (имя источника, хэш снимка) сортируются.
+    """sha256 входа; четвёрки (id источника, тип, имя, хэш снимка) сортируются.
 
     Порядок источников в запросе задаёт пользователь при запуске, и от перестановки
     ответ модели по существу не меняется. Имя входит в хэш, потому что модель видит его
-    и цитирует в основаниях. JSON вместо склейки строк исключает совпадение разных
-    входов при именах с разделителями.
+    и цитирует в основаниях. Id и тип входят, потому что основания перенесённых правок
+    ссылаются на конкретный источник: пересозданный источник с тем же текстом должен
+    дать новый вход. JSON вместо склейки строк исключает совпадение разных входов при
+    именах с разделителями.
     """
     payload = json.dumps(
         [contract_version, provider, document_hash, sorted(sources)],

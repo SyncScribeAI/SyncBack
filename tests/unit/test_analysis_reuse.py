@@ -22,7 +22,12 @@ from app.domain.analysis_reuse import (
     delta_precheck,
     delta_scope_check,
     harness_counters,
+    sources_replaced_check,
 )
+
+
+_A = ("00000000-0000-0000-0000-00000000000a", "file", "A", "a" * 64)
+_B = ("00000000-0000-0000-0000-00000000000b", "url", "B", "b" * 64)
 
 
 def _hash(**overrides: object) -> str:
@@ -30,14 +35,14 @@ def _hash(**overrides: object) -> str:
         "contract_version": "2.0",
         "provider": "ml_http",
         "document_hash": "d" * 64,
-        "sources": [("A", "a" * 64), ("B", "b" * 64)],
+        "sources": [_A, _B],
     }
     params.update(overrides)
     return analysis_input_hash(**params)  # type: ignore[arg-type]
 
 
 def test_hash_ignores_source_order() -> None:
-    assert _hash() == _hash(sources=[("B", "b" * 64), ("A", "a" * 64)])
+    assert _hash() == _hash(sources=[_B, _A])
     assert len(_hash()) == 64
 
 
@@ -47,9 +52,12 @@ def test_hash_ignores_source_order() -> None:
         {"contract_version": "2.1"},
         {"provider": "ml_plugin"},
         {"document_hash": "e" * 64},
-        {"sources": [("A", "a" * 64), ("B", "c" * 64)]},
-        {"sources": [("A", "a" * 64), ("C", "b" * 64)]},
-        {"sources": [("A", "a" * 64)]},
+        {"sources": [_A, (*_B[:3], "c" * 64)]},
+        {"sources": [_A, (_B[0], _B[1], "C", _B[3])]},
+        {"sources": [_A]},
+        # Пересозданный источник: то же имя и текст, другой id.
+        {"sources": [_A, ("00000000-0000-0000-0000-00000000000c", *_B[1:])]},
+        {"sources": [_A, (_B[0], "file", *_B[2:])]},
     ],
 )
 def test_hash_changes_with_any_input_part(override: dict[str, object]) -> None:
@@ -57,7 +65,9 @@ def test_hash_changes_with_any_input_part(override: dict[str, object]) -> None:
 
 
 def test_names_with_separators_do_not_collide() -> None:
-    assert _hash(sources=[("A,B", "x")]) != _hash(sources=[("A", "B,x")])
+    assert _hash(sources=[(_A[0], "file", "A,B", "x")]) != _hash(
+        sources=[(_A[0], "file", "A", "B,x")]
+    )
 
 
 BASELINE = Baseline(job_id=uuid.uuid4(), input_hash="h" * 64)
@@ -225,3 +235,22 @@ def test_chain_length_grows_only_on_selective_runs() -> None:
     assert (reused.mode, reused.chain_length) == ("reused", 2)
     full = run(ReuseReason.INPUT_CHANGED)
     assert (full.mode, full.chain_length, full.baseline_job_id) == ("full", 0, None)
+
+
+_IDS = [uuid.uuid4() for _ in range(3)]
+
+
+@pytest.mark.parametrize(
+    ("baseline", "current", "expected"),
+    [
+        ([_IDS[0], _IDS[1]], [_IDS[0], _IDS[1]], None),
+        ([_IDS[0], _IDS[1]], [_IDS[0]], None),
+        ([_IDS[0]], [_IDS[0], _IDS[1]], None),
+        ([_IDS[0], _IDS[1]], [_IDS[0], _IDS[2]], DeltaFallback.SOURCES_REPLACED),
+        ([_IDS[0]], [_IDS[2]], DeltaFallback.SOURCES_REPLACED),
+    ],
+)
+def test_sources_replaced_only_when_one_leaves_and_another_comes(
+    baseline: list[uuid.UUID], current: list[uuid.UUID], expected: DeltaFallback | None
+) -> None:
+    assert sources_replaced_check(baseline, current) is expected

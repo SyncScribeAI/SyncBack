@@ -324,3 +324,37 @@ async def test_audit_runs_full_analysis_and_records_recall(
     assert (audit["recall"], audit["missed"]) == (1.0, 0)
     suggestions, _ = await _rows(sessionmaker, second_id)
     assert len(suggestions) == 1
+
+
+async def test_recreated_source_with_same_text_runs_full_analysis(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,  # noqa: F811
+    worker: Worker,  # noqa: F811
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Случай из ревью: источник удалён и создан заново с тем же именем и текстом."""
+    headers, base, first_id = await _first(client, queue, worker)
+    project = base.split("/documents/")[0]
+    [old_source] = (await client.get(f"{project}/sources", headers=headers)).json()["items"]
+    assert (
+        await client.delete(f"{project}/sources/{old_source['id']}", headers=headers)
+    ).status_code == 204
+    response = await client.post(
+        f"{project}/sources/note",
+        json={"name": "Решения", "text_content": "t", "scope": "project"},
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    new_source_id = response.json()["id"]
+    calls = len(worker.analyzer.requests)
+
+    second_id, _ = await _rerun(client, queue, headers, base)
+
+    second = await _job(sessionmaker, second_id)
+    assert second.pipeline_meta is not None
+    incremental = second.pipeline_meta["incremental"]
+    assert (incremental["mode"], incremental["fallback_reason"]) == ("full", "sources_replaced")
+    assert len(worker.analyzer.requests) == calls + 1
+    [suggestion] = (await _rows(sessionmaker, second_id))[0]
+    assert suggestion.carried_from_id is None
+    assert {row["source_id"] for row in suggestion.evidence} == {new_source_id}

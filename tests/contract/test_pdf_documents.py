@@ -1,12 +1,15 @@
-"""PDF как документ: загрузка, редактор с размерами страниц, кэш разбора, геометрия правок."""
+"""PDF как документ: загрузка, редактор с размерами страниц, кэш разбора, геометрия правок,
+экспорт аннотациями."""
 
 from __future__ import annotations
 
+import io
 import uuid
 from pathlib import Path
 
 import pytest
 from httpx import AsyncClient
+from pypdf import PdfReader
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -23,8 +26,6 @@ from app.domain.value_objects import DocumentFormatVO
 from app.infrastructure.db.models.analysis_flag import AnalysisFlag
 from app.infrastructure.db.models.document import Document
 from app.infrastructure.db.models.suggestion import Suggestion
-from app.infrastructure.exporters.exporter_registry import DocumentExporterRegistry
-from app.domain.exceptions import UnsupportedExportFormatError
 from tests.contract.conftest import InMemoryFileStorage, create_project, register_and_login
 from tests.contract.test_analysis_jobs import FakeAnalysisQueue, queue  # noqa: F401
 from tests.contract.test_worker_pipeline_v2 import Worker, worker  # noqa: F401
@@ -232,6 +233,42 @@ async def test_geometry_failure_keeps_analysis_result(
     assert all(s.geometry is None for s in suggestions)
 
 
-def test_pdf_export_is_refused_until_annotation_exporter() -> None:
-    with pytest.raises(UnsupportedExportFormatError):
-        DocumentExporterRegistry().get_exporter(DocumentFormatVO.PDF)
+async def test_accepted_pdf_suggestions_are_exported_as_annotations(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,  # noqa: F811
+    worker: Worker,  # noqa: F811
+) -> None:
+    worker.analyzer.respond = _change_and_flag
+    headers = await register_and_login(client)
+    project_id = await create_project(client, headers)
+    document = (await _upload(client, headers, project_id, "headings_lists.pdf")).json()
+    base = f"/api/v1/projects/{project_id}/documents/{document['id']}"
+    await client.post(
+        f"/api/v1/projects/{project_id}/sources/note",
+        json={"name": "A", "text_content": "t", "scope": "project"},
+        headers=headers,
+    )
+    await client.post(f"{base}/analysis-jobs", headers=headers)
+    job_id, source_ids = queue.enqueued[-1]
+    await v2.analyze_document(str(job_id), [str(s) for s in source_ids], 0)
+    items = (await client.get(f"{base}/suggestions", headers=headers)).json()["items"]
+
+    finalized = await client.put(
+        f"{base}/suggestions/review",
+        json={
+            "review_version": 0,
+            "decisions": [{"suggestion_id": i["id"], "decision": "accepted"} for i in items],
+            "finalize": True,
+        },
+        headers=headers,
+    )
+    assert finalized.status_code == 200, finalized.text
+    exported = await client.get(f"{base}/export", params={"export_format": "pdf"}, headers=headers)
+
+    assert exported.status_code == 200, exported.text
+    assert exported.headers["content-type"] == "application/pdf"
+    assert exported.content.startswith(_pdf("headings_lists.pdf"))
+    reader = PdfReader(io.BytesIO(exported.content))
+    annotations = [a.get_object() for a in reader.pages[0]["/Annots"]]
+    assert sorted(a["/Subtype"] for a in annotations) == ["/Caret", "/StrikeOut"]
+    assert {a["/Contents"] for a in annotations} == {"четырнадцати дней", " (по умолчанию)"}

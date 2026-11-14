@@ -5,11 +5,15 @@ AppliedChange, а не с ORM-моделью Suggestion напрямую.
 start_offset/end_offset — границы old_text в plain_text документа (правки конвейера v2).
 Экспортёр доверяет им, только если текст файла в этих границах совпадает с old_text;
 иначе, как и для правок без границ, ищет первое вхождение.
+
+rects нужны форматам с фиксированной вёрсткой (PDF): текст там не переписывается,
+правка ставится отметкой поверх места на странице.
 """
 
 from dataclasses import dataclass
 from typing import Protocol
 
+from app.domain.document_geometry import PageRect
 from app.domain.value_objects import DocumentFormatVO
 
 
@@ -21,6 +25,7 @@ class AppliedChange:
     new_text: str | None
     start_offset: int | None = None
     end_offset: int | None = None
+    rects: tuple[PageRect, ...] = ()
 
     @property
     def has_span(self) -> bool:

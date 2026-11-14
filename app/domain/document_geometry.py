@@ -111,3 +111,27 @@ def rects_to_json(rects: tuple[PageRect, ...]) -> dict[str, list[list[float]]] |
     if not rects:
         return None
     return {"rects": [[r.page, *(round(v, 1) for v in (r.x0, r.y0, r.x1, r.y1))] for r in rects]}
+
+
+def rects_from_json(geometry: object) -> tuple[PageRect, ...]:
+    """Прямоугольники из поля geometry (обратное rects_to_json).
+
+    Поле пишется воркером, но читается из JSONB, поэтому записи неверной формы
+    пропускаются: одна испорченная запись не должна ломать экспорт всего документа.
+    """
+    if not isinstance(geometry, dict):
+        return ()
+    items = geometry.get("rects")
+    if not isinstance(items, list):
+        return ()
+    rects: list[PageRect] = []
+    for item in items:
+        if not isinstance(item, list) or len(item) != 5:
+            continue
+        if not all(isinstance(v, int | float) and not isinstance(v, bool) for v in item):
+            continue
+        page, x0, y0, x1, y1 = item
+        if page < 1 or x1 <= x0 or y1 <= y0:
+            continue
+        rects.append(PageRect(int(page), float(x0), float(y0), float(x1), float(y1)))
+    return tuple(rects)

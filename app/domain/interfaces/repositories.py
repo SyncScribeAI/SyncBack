@@ -13,6 +13,12 @@ from typing import TYPE_CHECKING, Any, TypedDict
 
 from app.domain.interfaces.user_repository import IUserRepository  # noqa: F401
 from app.domain.pipeline_run import PipelineRunSummary
+from app.domain.source_snapshot import (
+    JobSourceRecord,
+    JobSourceSnapshot,
+    SnapshotDraft,
+    SourceSnapshot,
+)
 from app.domain.value_objects import (
     AnalysisJobStatusVO,
     DocumentFormatVO,
@@ -591,3 +597,34 @@ class IProjectRepository(ABC):
 
     @abstractmethod
     async def delete(self, project: Project) -> None: ...
+
+
+class ISourceSnapshotRepository(ABC):
+    """Снимки источников и строки задач анализа; оперирует доменными типами без ORM."""
+
+    @abstractmethod
+    async def ensure_snapshots(self, drafts: Sequence[SnapshotDraft]) -> dict[str, uuid.UUID]:
+        """Создаёт недостающие снимки и возвращает id по content_hash.
+
+        Повторная запись того же текста ничего не меняет: снимок адресуется содержимым.
+        """
+
+    @abstractmethod
+    async def add_job_sources(
+        self, job_id: uuid.UUID, records: Sequence[JobSourceRecord], ids: dict[str, uuid.UUID]
+    ) -> None: ...
+
+    @abstractmethod
+    async def list_job_sources(self, job_id: uuid.UUID) -> list[JobSourceSnapshot]: ...
+
+    @abstractmethod
+    async def get_in_project(
+        self, project_id: uuid.UUID, snapshot_id: uuid.UUID
+    ) -> SourceSnapshot | None: ...
+
+    @abstractmethod
+    async def delete_unreferenced(self, project_id: uuid.UUID) -> list[str]:
+        """Удаляет снимки проекта без ссылок из задач и возвращает их ключи хранилища."""
+
+    @abstractmethod
+    async def list_storage_keys(self, project_id: uuid.UUID) -> list[str]: ...

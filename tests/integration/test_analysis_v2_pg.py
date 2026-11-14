@@ -28,6 +28,7 @@ from app.domain.interfaces.document_analyzer import (
     ProposedChange,
     ReviewFlag,
 )
+from app.domain.interfaces.file_storage import UploadContent
 from app.domain.interfaces.source_connector import SourceRef
 from app.infrastructure.db.models.analysis_flag import AnalysisFlag
 from app.infrastructure.db.models.analysis_job import AnalysisJob
@@ -83,8 +84,18 @@ class GatedAnalyzer:
 
 
 class FakeStorage:
+    """Документ отдаётся по любому ключу, снимки источников пишутся в общий словарь."""
+
+    files: dict[str, bytes] = {}
+
     async def download(self, key: str) -> bytes:
-        return DOCUMENT
+        return self.files.get(key, DOCUMENT)
+
+    async def exists(self, key: str) -> bool:
+        return key in self.files
+
+    async def upload(self, key: str, content: UploadContent) -> None:
+        self.files[key] = content.stream.read()
 
 
 class FakeConnector:

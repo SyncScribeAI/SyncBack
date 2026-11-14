@@ -44,6 +44,7 @@ from app.domain.services.document_export_service import DocumentExportService
 from app.domain.services.document_service import DocumentService
 from app.domain.services.project_service import ProjectService
 from app.domain.services.source_service import SourceService
+from app.domain.services.source_snapshot_service import SourceSnapshotService
 from app.domain.services.suggestion_service import SuggestionService
 from app.infrastructure.cache.redis_client import get_redis_client
 from app.infrastructure.db.repositories.dashboard_repository import DashboardRepository
@@ -177,6 +178,12 @@ def get_source_service(
         upload_limits=UploadLimits.from_megabytes(settings.max_upload_size_mb),
         parser_registry=_get_parser_registry(),
     )
+
+
+def get_source_snapshot_service(
+    uow: SqlAlchemyUnitOfWork = Depends(get_uow),
+) -> SourceSnapshotService:
+    return SourceSnapshotService(uow=uow, file_storage=_get_file_storage())
 
 
 def get_document_export_service(

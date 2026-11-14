@@ -24,6 +24,7 @@ from app.domain.interfaces.repositories import DocumentRow
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.lifecycle import DocumentLifecycle
 from app.domain.policies import UploadLimits
+from app.domain.source_snapshot import fingerprints_storage_key
 from app.domain.storage_keys import document_storage_key
 from app.domain.value_objects import (
     DocumentFormatVO,
@@ -212,6 +213,14 @@ class DocumentService:
                     extra={"storage_key": key, "document_id": str(document_id)},
                 )
 
+    async def _unreferenced_snapshot_keys(self, project_id: uuid.UUID) -> list[str]:
+        """Снимки, на которые после удаления задач документа не ссылается ни одна задача.
+
+        Снимок общий для проекта, поэтому удаляется только без ссылок из других документов.
+        """
+        keys = await self._uow.snapshots.delete_unreferenced(project_id)
+        return [k for key in keys for k in (key, fingerprints_storage_key(key))]
+
     async def delete_document(self, document: Document) -> None:
         """
         Удаление документа.
@@ -238,6 +247,7 @@ class DocumentService:
         async with self._uow:
             await self._uow.documents.delete_document_scoped_sources(document_id)
             await self._uow.documents.delete(document)
+            keys_to_delete += await self._unreferenced_snapshot_keys(document.project_id)
             await self._uow.commit()
 
         await self._delete_storage_objects(
@@ -289,6 +299,7 @@ class DocumentService:
                 deleted.get("original_storage_key"),
                 deleted.get("exported_storage_key"),
             )
+            keys_to_delete += await self._unreferenced_snapshot_keys(project_id)
             await self._uow.commit()
 
         await self._delete_storage_objects(

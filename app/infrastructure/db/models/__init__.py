@@ -19,6 +19,10 @@ from app.infrastructure.db.models.enums import (  # noqa: F401
 )
 from app.infrastructure.db.models.project import Project  # noqa: F401
 from app.infrastructure.db.models.source import Source  # noqa: F401
+from app.infrastructure.db.models.source_snapshot import (  # noqa: F401
+    AnalysisJobSourceSnapshot,
+    SourceSnapshotModel,
+)
 from app.infrastructure.db.models.suggestion import Suggestion  # noqa: F401
 from app.infrastructure.db.models.suggestion_source import suggestion_sources  # noqa: F401
 from app.infrastructure.db.models.user import User  # noqa: F401

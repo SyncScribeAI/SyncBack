@@ -25,6 +25,7 @@ dependencies = [
     "slowapi>=0.1.9",
     "python-multipart>=0.0.9",
     "python-docx>=1.1",
+    "markdown-it-py==4.3.0",
     "uvicorn[standard]>=0.29",
     "structlog>=24.1",
     "gunicorn>=22.0",

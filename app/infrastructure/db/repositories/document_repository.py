@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Any, cast
 
-from sqlalchemy import ColumnElement, CursorResult, and_, delete, func, select, tuple_, update
+from sqlalchemy import ColumnElement, and_, delete, func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.interfaces.repositories import DocumentRow, IDocumentRepository
@@ -310,7 +309,7 @@ class DocumentRepository(IDocumentRepository):
     async def delete_document_scoped_sources(
         self,
         document_id: uuid.UUID,
-    ) -> int:
+    ) -> list[str]:
         """Удалить источники scope=DOCUMENT, привязанные к данному документу.
 
         Выполняется одним DELETE с подзапросом:
@@ -321,11 +320,13 @@ class DocumentRepository(IDocumentRepository):
                    SELECT source_id FROM document_sources
                     WHERE document_id = :document_id
                )
+             RETURNING storage_key
 
-        Источники scope=PROJECT намеренно не трогаются — они принадлежат
+        Источники scope=PROJECT намеренно не трогаются: они принадлежат
         проекту и переживают удаление документа.
 
-        Возвращает количество удалённых строк (для логирования/отладки).
+        Возвращает ключи файлов удалённых источников: после commit сервис удаляет
+        их из хранилища, иначе содержимое источника пережило бы его запись.
         Должен вызываться внутри той же транзакции, что и delete / delete_by_id,
         ДО flush/commit, чтобы FK-каскад по document_sources не успел
         удалить строки раньше подзапроса.
@@ -335,13 +336,18 @@ class DocumentRepository(IDocumentRepository):
             .where(document_sources.c.document_id == document_id)
             .scalar_subquery()
         )
-        stmt = delete(Source).where(
-            Source.scope == SourceScopeVO.DOCUMENT,
-            Source.id.in_(subq),
+        stmt = (
+            delete(Source)
+            .where(
+                Source.scope == SourceScopeVO.DOCUMENT,
+                Source.id.in_(subq),
+            )
+            .returning(Source.storage_key)
         )
-        result = cast(CursorResult[Any], await self._session.execute(stmt))
+        result = await self._session.execute(stmt)
+        keys = [key for key in result.scalars() if key]
         await self._session.flush()
-        return result.rowcount
+        return keys
 
     async def delete(self, document: Document) -> None:
         await self._session.delete(document)

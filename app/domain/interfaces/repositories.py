@@ -156,10 +156,10 @@ class IDocumentRepository(ABC):
         ...
 
     @abstractmethod
-    async def delete_document_scoped_sources(self, document_id: uuid.UUID) -> int:
+    async def delete_document_scoped_sources(self, document_id: uuid.UUID) -> list[str]:
         """Удалить источники со scope=document, прикреплённые к документу.
 
-        Возвращает число удалённых источников.
+        Возвращает ключи файлов удалённых источников для очистки хранилища после commit.
         """
         ...
 

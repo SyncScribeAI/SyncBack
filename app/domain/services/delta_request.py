@@ -1,8 +1,8 @@
-"""Выборочный запрос инкрементального анализа и проверка правок по его ответу.
+"""Запрос со всеми блоками документа и сокращёнными источниками.
 
 Чистые функции: отпечатки прошлого входа, сводки прошлого результата и тексты
 источников уже загружены воркером. Решения о пределах принимает app.domain.analysis_reuse,
-выбор блоков и сегментов делает app.domain.services.delta_selection.
+сегменты источников сокращает app.domain.services.delta_selection.
 """
 
 from __future__ import annotations
@@ -29,10 +29,10 @@ from app.domain.services.delta_merge import evidence_changed
 from app.domain.services.delta_selection import (
     BlockText,
     DeltaLimits,
+    ReducedSource,
     SelectedBlocks,
     SourceInput,
     reduce_sources,
-    select_blocks,
 )
 from app.domain.services.source_differ import diff_fingerprints
 from app.domain.source_snapshot import SourceSegment
@@ -59,7 +59,7 @@ def summarize_delta(base: frozenset[int], segments: Sequence[Segments]) -> Delta
 
 @dataclass(frozen=True, slots=True)
 class DeltaRequest:
-    """Выборочный запрос и всё, что нужно для сведения ответа с прошлым результатом."""
+    """Запрос с сокращёнными источниками и данные для сведения результата."""
 
     baseline: Baseline
     base: frozenset[int]
@@ -91,8 +91,7 @@ class DeltaRequest:
 def checkable_blocks(document: DocumentInput) -> list[BlockText]:
     """Блоки, которые harness проверяет: редактируемые, не заголовки, с текстом.
 
-    Условие повторяет Block.checkable контракта harness: доля выбранных блоков считается
-    от того же числа, что и счётчик проверенных блоков в его ответе.
+    Условие повторяет Block.checkable контракта harness для счётчиков и сведения ответа.
     """
     blocks: list[BlockText] = []
     for block in document.blocks:
@@ -116,15 +115,16 @@ def build_delta_request(
     policy: DeltaPolicy,
     limits: DeltaLimits,
 ) -> DeltaRequest | DeltaFallback:
-    """Выбор блоков и сегментов; DeltaFallback, если выборочная проверка не подходит.
+    """Все проверяемые блоки и сокращённые источники либо причина полного запроса.
 
-    Новый абзац, который не совпал ни с одним блоком, может требовать правки add в любом
-    месте документа; такой вход проверяется полностью. Пустой sources означает, что
-    источник только потерял текст и для выбранных блоков не нашлось опоры: вызывать
-    модель не с чем, а правила переноса отметят правки, потерявшие основание.
+    При чистом удалении текста полный текущий источник нужен для проверки утверждений,
+    у которых раньше не было правок и сохранённых оснований.
     """
     base = fingerprints.all
     summary = summarize_delta(base, segments)
+    fallback = delta_scope_check(changed_share=summary.changed_share, policy=policy)
+    if fallback is not None:
+        return fallback
     current = frozenset(fp for source in segments for _, fp in source)
     changed = frozenset(
         row.id
@@ -138,37 +138,29 @@ def build_delta_request(
         if evidence_changed(flag.evidence, fingerprints.by_snapshot, current)
     )
     blocks = checkable_blocks(document)
-    selected = select_blocks(
-        blocks,
-        (
-            segment.text_in(payload.text)
-            for payload, source in zip(payloads, segments, strict=True)
-            for segment, fp in source
-            if fp not in base
-        ),
-        evidence_changed=evidence_blocks,
-        flagged={flag.block_ref for flag in flags},
-        limits=limits,
+    selected = SelectedBlocks(
+        refs=frozenset(block.ref for block in blocks),
+        by_overlap=0,
+        by_token=0,
+        by_evidence=0,
+        by_flag=0,
     )
-    fallback = delta_scope_check(
-        changed_share=summary.changed_share,
-        selected=len(selected.refs),
-        checkable=len(blocks),
-        policy=policy,
-    )
-    if fallback is not None:
-        return fallback
-    if not selected.refs and summary.segments_added:
-        return DeltaFallback.NO_BLOCKS_MATCHED
     reduced = reduce_sources(
         [
             SourceInput(text=payload.text, segments=source)
             for payload, source in zip(payloads, segments, strict=True)
         ],
         base,
-        (block.text for block in blocks if block.ref in selected.refs),
+        (block.text for block in blocks),
         limits,
     )
+    if (summary.segments_removed and not summary.segments_added) or not any(
+        part.segment_indexes for part in reduced
+    ):
+        reduced = [
+            ReducedSource(segment_indexes=tuple(range(len(source))), text=payload.text)
+            for payload, source in zip(payloads, segments, strict=True)
+        ]
     sources = [
         replace(payload, text=part.text)
         for payload, part in zip(payloads, reduced, strict=True)

@@ -1,8 +1,8 @@
-"""Инкрементальный анализ: изменённый источник проверяется выборочно.
+"""Инкрементальный анализ: весь документ и сокращённые источники.
 
 Конвейер заменён заглушкой, которая отвечает по тексту запроса: правка срока для блока
 со сроком, если он редактируемый, и флаг для блока об оплате. Заглушка проверяет только
-механику выбора и переноса; полноту выборочной проверки на реальной модели эти тесты не
+механику запроса и переноса; полноту проверки на реальной модели эти тесты не
 измеряют.
 """
 
@@ -65,6 +65,9 @@ SOURCE = "\n\n".join(
         "Обед в столовой с часу до двух.",
         "Связь с дежурным по внутреннему телефону.",
         "Почта для писем лежит на ресепшене.",
+        "Кварцевый генератор синхронизирует осциллограф.",
+        "Гидравлический насос охлаждается радиатором.",
+        "Телеметрия агрегируется автоматически.",
     ]
 )
 _DAYS = re.compile(r"[^\n]*?(\d+) рабочих дн[^\n]*")
@@ -166,7 +169,7 @@ async def _decide(client: AsyncClient, headers: dict[str, str], base: str, decis
     assert response.status_code == 200, response.text
 
 
-async def test_changed_paragraph_is_sent_with_context_to_few_blocks(
+async def test_changed_paragraph_is_sent_with_context_to_all_blocks(
     client: AsyncClient,
     queue: FakeAnalysisQueue,  # noqa: F811
     worker: Worker,  # noqa: F811
@@ -188,8 +191,10 @@ async def test_changed_paragraph_is_sent_with_context_to_few_blocks(
     assert len(source.text) < len(full_request.sources[0].text)
     editable = [block.text for block in request.document.blocks if block.editable]
     assert "Срок ответа составляет 10 рабочих дней." in editable
-    assert len(editable) <= checkable // 2
-    # Документ уходит целиком: остальные блоки нужны модели как контекст.
+    assert len(editable) == checkable
+    assert [b.editable for b in request.document.blocks] == [
+        b.editable for b in full_request.document.blocks
+    ]
     assert len(request.document.blocks) == len(full_request.document.blocks)
 
     second = await _job(sessionmaker, second_id)
@@ -238,6 +243,67 @@ async def test_rejected_suggestion_is_not_shown_again(
     assert second.pipeline_meta["incremental"]["inherited"] == 1
 
 
+async def test_source_paraphrase_without_shared_words_keeps_all_blocks_checkable(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,  # noqa: F811
+    worker: Worker,  # noqa: F811
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    worker.connector.texts["Решения"] = SOURCE
+    worker.analyzer.respond = lambda request: AnalysisResult(status=AnalysisStatus.COMPLETED)
+    headers, project_id, document_id, first_id, source_ids = await _start(
+        client, queue, ["Решения"], content=DOCUMENT
+    )
+    await v2.analyze_document(first_id, source_ids, 0)
+    base = f"/api/v1/projects/{project_id}/documents/{document_id}"
+    paraphrase = "Обрабатывать корреспонденцию следует за трое суток."
+    worker.connector.texts["Решения"] = SOURCE.replace(DEADLINE, paraphrase)
+
+    def paraphrased_response(request: AnalysisRequest) -> AnalysisResult:
+        # Заглушка проверяет доступность блока, а не качество семантики реальной модели.
+        ref = _editable(request, "10 рабочих")
+        assert ref is not None
+        return AnalysisResult(
+            status=AnalysisStatus.COMPLETED,
+            suggestions=(
+                ProposedChange(
+                    kind="modify",
+                    block_ref=ref,
+                    old_text="10 рабочих дней",
+                    new_text="3 суток",
+                    quotes=(Quote(source_name="Решения", text=paraphrase),),
+                ),
+            ),
+            meta={"checked_blocks": 10, "errors": 0},
+        )
+
+    worker.analyzer.respond = paraphrased_response
+    second_id, _ = await _rerun(client, queue, headers, base)
+    second = await _job(sessionmaker, second_id)
+    assert second.pipeline_meta is not None
+    assert second.pipeline_meta["incremental"]["mode"] == "delta"
+    assert second.pipeline_meta["run_stats"]["blocks_checked"] == 10
+    suggestions, _ = await _rows(sessionmaker, second_id)
+    assert [row.suggested_text for row in suggestions] == ["3 суток"]
+
+
+async def test_pending_results_are_replaced_for_all_checkable_blocks(
+    client: AsyncClient,
+    queue: FakeAnalysisQueue,  # noqa: F811
+    worker: Worker,  # noqa: F811
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    headers, base, _ = await _first(client, queue, worker)
+    worker.connector.texts["Решения"] = SOURCE.replace("5 рабочих дней", "3 рабочих дней")
+    worker.analyzer.respond = lambda request: AnalysisResult(
+        status=AnalysisStatus.COMPLETED, meta={"checked_blocks": 10, "errors": 0}
+    )
+    second_id, _ = await _rerun(client, queue, headers, base)
+    suggestions, flags = await _rows(sessionmaker, second_id)
+    assert suggestions == []
+    assert [flag.reason for flag in flags] == ["evidence_removed"]
+
+
 async def test_removed_evidence_marks_decision_stale_and_flags_block(
     client: AsyncClient,
     queue: FakeAnalysisQueue,  # noqa: F811
@@ -257,6 +323,10 @@ async def test_removed_evidence_marks_decision_stale_and_flags_block(
     assert "evidence_removed" in [flag.reason for flag in flags]
     items = (await client.get(f"{base}/suggestions", headers=headers)).json()["items"]
     assert [(item["stale"], item["carried_from_id"]) for item in items] == [(True, str(first.id))]
+    second = await _job(sessionmaker, second_id)
+    assert second.pipeline_meta is not None
+    assert second.pipeline_meta["run_stats"]["blocks_checked"] == 10
+    assert worker.analyzer.requests[-1].sources[0].text == worker.connector.texts["Решения"]
 
 
 async def test_chain_limit_falls_back_to_full_analysis(

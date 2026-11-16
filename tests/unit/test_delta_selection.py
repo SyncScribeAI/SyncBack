@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 
 from app.domain.analysis_reuse import Baseline, DeltaFallback, DeltaPolicy
 from app.domain.baseline_result import BaselineFlag, BaselineSuggestion, EvidenceRef
@@ -199,7 +200,15 @@ def _payload(text: str) -> SourcePayload:
 
 
 def _build(
-    old: str, new: str, policy: DeltaPolicy = DeltaPolicy(), **rows: object
+    old: str,
+    new: str,
+    policy: DeltaPolicy = DeltaPolicy(),
+    *,
+    document: DocumentInput = DOCUMENT,
+    limits: DeltaLimits = DeltaLimits(
+        blocks_per_segment=1, score_threshold=0.99, support_segments=1
+    ),
+    **rows: object,
 ) -> DeltaRequest | DeltaFallback:
     base_segments = segment_fingerprints(old)
     segments = segment_fingerprints(new)
@@ -209,13 +218,13 @@ def _build(
             all=frozenset(fp for _, fp in base_segments),
             by_snapshot={"old": [fp for _, fp in base_segments]},
         ),
-        document=DOCUMENT,
+        document=document,
         payloads=[_payload(new)],
         segments=[segments],
         suggestions=rows.get("suggestions", []),  # type: ignore[arg-type]
         flags=rows.get("flags", []),  # type: ignore[arg-type]
         policy=policy,
-        limits=DeltaLimits(blocks_per_segment=1, score_threshold=0.99, support_segments=1),
+        limits=limits,
     )
 
 
@@ -240,18 +249,42 @@ def test_checkable_blocks_skip_headings() -> None:
     assert [block.ref for block in checkable_blocks(DOCUMENT)] == ["b1", "b2", "b3", "b4"]
 
 
-def test_delta_request_selects_block_and_reduces_source() -> None:
+def test_delta_request_checks_all_blocks_and_reduces_source() -> None:
     new = OLD.replace("пять рабочих дней", "три рабочих дня")
     planned = _build(OLD, new)
     assert isinstance(planned, DeltaRequest)
-    assert planned.selected.refs == {"b1"}
+    assert planned.selected.refs == {"b1", "b2", "b3", "b4"}
+    assert planned.selected.by_overlap == planned.selected.by_token == 0
     [source] = planned.sources
     assert "три рабочих дня" in source.text
+    assert "Отчёт готовит бухгалтерия." in source.text
     assert "Почта для писем." not in source.text
-    assert planned.stats.blocks_checked == 1
+    assert planned.stats.blocks_checked == 4
     assert planned.stats.segments_sent < planned.stats.segments_total
     assert planned.stats.chars_sent == len(source.text)
     assert (planned.summary.segments_added, planned.summary.segments_removed) == (1, 1)
+
+
+def test_delta_request_preserves_parser_editability_and_skips_empty_blocks() -> None:
+    document = _document(["Раздел", "Оплата картой", " ", "Неизменяемый блок"])
+    document = replace(
+        document,
+        blocks=[
+            replace(block, editable=False) if block.ref == "b3" else block
+            for block in document.blocks
+        ],
+    )
+    planned = _build(OLD, OLD + "\n\nКофемашина стоит у окна.", document=document)
+    assert isinstance(planned, DeltaRequest)
+    assert planned.rechecked == {"b1"}
+    assert planned.stats.blocks_checked == 1
+
+
+def test_delta_request_sends_full_sources_when_reduction_has_no_context() -> None:
+    planned = _build(OLD, OLD, limits=DeltaLimits(context_segments=0, support_segments=0))
+    assert isinstance(planned, DeltaRequest)
+    assert planned.sources[0].text == OLD
+    assert planned.stats.segments_sent == planned.stats.segments_total
 
 
 def test_delta_request_falls_back_when_share_is_large() -> None:
@@ -259,17 +292,22 @@ def test_delta_request_falls_back_when_share_is_large() -> None:
     assert _build(OLD, new, DeltaPolicy(max_changed_share=0.01)) is DeltaFallback.CHANGED_SHARE
 
 
-def test_delta_request_falls_back_when_many_blocks_selected() -> None:
+def test_delta_request_ignores_old_block_share_limit() -> None:
     new = OLD.replace("пять рабочих дней", "три рабочих дня").replace("картой", "переводом")
-    assert _build(OLD, new, DeltaPolicy(max_blocks_share=0.25)) is DeltaFallback.BLOCKS_SHARE
+    planned = _build(OLD, new, DeltaPolicy(max_blocks_share=0))
+    assert isinstance(planned, DeltaRequest)
+    assert planned.selected.refs == {"b1", "b2", "b3", "b4"}
 
 
-def test_delta_request_falls_back_when_new_text_matches_no_block() -> None:
+def test_delta_request_checks_all_blocks_when_new_text_has_no_shared_words() -> None:
     new = OLD + "\n\nКофемашина стоит у окна."
-    assert _build(OLD, new) is DeltaFallback.NO_BLOCKS_MATCHED
+    planned = _build(OLD, new)
+    assert isinstance(planned, DeltaRequest)
+    assert planned.rechecked == {"b1", "b2", "b3", "b4"}
+    assert "Кофемашина стоит у окна." in planned.sources[0].text
 
 
-def test_delta_request_rechecks_block_whose_evidence_was_removed() -> None:
+def test_delta_request_uses_full_sources_when_text_was_only_removed() -> None:
     old_segments = segment_fingerprints(OLD)
     removed = next(
         position
@@ -289,19 +327,18 @@ def test_delta_request_rechecks_block_whose_evidence_was_removed() -> None:
     )
     planned = _build(OLD, new, suggestions=[suggestion])
     assert isinstance(planned, DeltaRequest)
-    assert planned.selected.refs == {"b4"}
-    assert planned.selected.by_evidence == 1
+    assert planned.rechecked == {"b1", "b2", "b3", "b4"}
     assert planned.changed == {suggestion.id}
-    # Опоры для блока в оставшемся тексте нет: вызывать модель не с чем.
-    assert planned.sources == []
-    assert planned.rechecked == {"b4"}
+    assert planned.sources[0].text == new
 
 
-def test_delta_request_without_changes_selects_nothing() -> None:
+def test_delta_request_uses_full_sources_for_removal_without_previous_evidence() -> None:
     new = OLD.replace("\n\nПочта для писем.", "")
     planned = _build(OLD, new)
     assert isinstance(planned, DeltaRequest)
-    assert (planned.selected.refs, planned.sources) == (frozenset(), [])
+    assert planned.calls_model
+    assert planned.sources[0].text == new
+    assert planned.stats.segments_sent == planned.stats.segments_total
 
 
 def test_flagged_block_is_rechecked() -> None:
@@ -309,18 +346,17 @@ def test_flagged_block_is_rechecked() -> None:
     flag = BaselineFlag(id=uuid.UUID(int=6), block_ref="b3", reason="conflict", decided=False)
     planned = _build(OLD, new, flags=[flag])
     assert isinstance(planned, DeltaRequest)
-    assert planned.selected.refs == {"b1", "b3"}
+    assert planned.selected.refs == {"b1", "b2", "b3", "b4"}
     assert planned.rechecked == planned.selected.refs
 
 
-def test_flagged_block_keeps_flag_when_model_is_not_called() -> None:
-    # У b4 нет опоры в оставшемся тексте, поэтому модель не вызывается.
+def test_removed_text_does_not_skip_model_for_flagged_block() -> None:
     new = OLD.replace("\n\nОтчёт готовит бухгалтерия.", "")
     flag = BaselineFlag(id=uuid.UUID(int=6), block_ref="b4", reason="conflict", decided=False)
     planned = _build(OLD, new, flags=[flag])
     assert isinstance(planned, DeltaRequest)
-    assert not planned.calls_model
-    assert planned.rechecked == frozenset()
+    assert planned.calls_model
+    assert planned.rechecked == {"b1", "b2", "b3", "b4"}
 
 
 def _draft(kind: ChangeKind, evidence: tuple[Evidence, ...]) -> SuggestionDraft:

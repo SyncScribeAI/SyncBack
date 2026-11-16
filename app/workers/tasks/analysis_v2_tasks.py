@@ -298,9 +298,7 @@ async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
                 delta=await _delta(job, decision, fetched),
             )
         else:
-            request = _build_request(
-                job, attempt, document, delta_request.sources, delta_request.selected.refs
-            )
+            request = _build_request(job, attempt, document, delta_request.sources)
             run_input = replace(
                 run_input,
                 stats=delta_request.stats,
@@ -458,7 +456,7 @@ async def _plan_from_baseline(
     )
     if isinstance(planned, DeltaRequest):
         logger.info(
-            "Анализ v2: выборочная проверка блоков",
+            "Анализ v2: все блоки с сокращёнными источниками",
             extra={
                 "job_id": str(job.id),
                 "baseline_job_id": str(baseline.job_id),

@@ -24,7 +24,7 @@ class IncrementalMode(StrEnum):
     OFF = "off"
     # Только перенос результата при неизменном входе.
     REUSE = "reuse"
-    # Перенос при неизменном входе и выборочная проверка блоков при изменённых источниках.
+    # Перенос при неизменном входе и сокращение источников с проверкой всех блоков.
     DELTA = "delta"
 
 
@@ -82,9 +82,10 @@ class Baseline:
 
 @dataclass(frozen=True, slots=True)
 class DeltaPolicy:
-    """Пределы, за которыми выборочная проверка теряет смысл; из ANALYSIS_DELTA_*."""
+    """Пределы сокращения источников; из ANALYSIS_DELTA_*."""
 
     max_changed_share: float = 0.3
+    # Сохранено для совместимости конфигурации, на проверку всех блоков не влияет.
     max_blocks_share: float = 0.5
     max_chain: int = 5
 
@@ -133,14 +134,10 @@ def sources_replaced_check(
     return None
 
 
-def delta_scope_check(
-    *, changed_share: float, selected: int, checkable: int, policy: DeltaPolicy
-) -> DeltaFallback | None:
-    """Большая доля изменений или выбранных блоков: полный анализ надёжнее и не дороже."""
+def delta_scope_check(*, changed_share: float, policy: DeltaPolicy) -> DeltaFallback | None:
+    """При большой доле изменений используются полные источники."""
     if changed_share > policy.max_changed_share:
         return DeltaFallback.CHANGED_SHARE
-    if checkable and selected > checkable * policy.max_blocks_share:
-        return DeltaFallback.BLOCKS_SHARE
     return None
 
 
@@ -170,8 +167,9 @@ def analysis_input_hash(
     дать новый вход. JSON вместо склейки строк исключает совпадение разных входов при
     именах с разделителями.
     """
+    # Результаты старого отбора блоков требуют новой проверки даже при том же тексте.
     payload = json.dumps(
-        [contract_version, provider, document_hash, sorted(sources)],
+        ["all_blocks_v1", contract_version, provider, document_hash, sorted(sources)],
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -258,8 +256,8 @@ class DeltaSummary:
 class RunInput:
     """Вход задачи и решение по нему; задача хранит это в pipeline_meta.
 
-    selective: задача проверила заново только часть блоков, остальное перенесено из
-    baseline. selection: счётчики отбора и сведения для meta.
+    selective: задача использовала сокращённые источники. Все проверяемые блоки
+    отправлены на анализ. selection: счётчики блоков и сведения для meta.
     """
 
     input_hash: str

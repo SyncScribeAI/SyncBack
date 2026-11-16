@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 
 import pytest
@@ -204,17 +206,20 @@ def test_precheck_fallbacks(
     assert _precheck(baseline, **overrides) is fallback
 
 
-def test_scope_check_limits_changed_share_and_selected_blocks() -> None:
+def test_scope_check_limits_only_changed_share() -> None:
     policy = DeltaPolicy(max_changed_share=0.3, max_blocks_share=0.5)
-    assert delta_scope_check(changed_share=0.3, selected=5, checkable=10, policy=policy) is None
-    assert (
-        delta_scope_check(changed_share=0.31, selected=1, checkable=10, policy=policy)
-        is DeltaFallback.CHANGED_SHARE
+    assert delta_scope_check(changed_share=0.3, policy=policy) is None
+    assert delta_scope_check(changed_share=0.31, policy=policy) is DeltaFallback.CHANGED_SHARE
+    assert delta_scope_check(changed_share=0.1, policy=DeltaPolicy(max_blocks_share=0)) is None
+
+
+def test_hash_invalidates_results_from_block_selection_algorithm() -> None:
+    previous = json.dumps(
+        ["2.0", "ml_http", "d" * 64, sorted([_A, _B])],
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
-    assert (
-        delta_scope_check(changed_share=0.1, selected=6, checkable=10, policy=policy)
-        is DeltaFallback.BLOCKS_SHARE
-    )
+    assert _hash() != hashlib.sha256(previous.encode("utf-8")).hexdigest()
 
 
 def test_chain_length_grows_only_on_selective_runs() -> None:

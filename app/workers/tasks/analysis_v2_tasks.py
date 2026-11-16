@@ -12,7 +12,12 @@ SUGGESTION_PROPAGATE_EXACT); запись правок, флагов и стат
 Повторная доставка и отмена. Результат пишется под блокировкой строки задачи
 (lock_if_active) только пока она активна: вторая доставка той же задачи или отмена
 пользователем во время ожидания конвейера ничего не запишут. Лишний вызов конвейера при
-повторной доставке возможен, лишних правок — нет.
+повторной доставке возможен, лишних правок нет.
+
+Отмену воркер проверяет между шагами, а загрузку источников и вызов ML снимает, не
+дожидаясь их конца (ANALYSIS_CANCEL_POLL_SECONDS). Отменённая задача не повторяется и не
+получает failed; воркер подтверждает остановку в execution_state. Если снят ещё не
+отвеченный запрос к ML, состояние unknown: сервис мог продолжить вычисление.
 
 Если конвейер ответил, сводка вызова (request_id, meta, счётчики блоков) пишется в задачу
 той же транзакцией, что и результат, — в том числе при отказе: по request_id отказ ищут в
@@ -82,7 +87,7 @@ from app.domain.interfaces.document_analyzer import (
 )
 from app.domain.interfaces.file_storage import UploadContent
 from app.domain.interfaces.source_connector import SourceRef
-from app.domain.lifecycle import AnalysisJobLifecycle, JobOutcome
+from app.domain.lifecycle import AnalysisExecutionLifecycle, AnalysisJobLifecycle, JobOutcome
 from app.domain.pipeline_run import PipelineRunSummary, summarize_run
 from app.domain.services.analysis_request_builder import DocumentInput, build_analysis_request
 from app.domain.services.analysis_result_mapper import FlagDraft, SuggestionDraft, map_result
@@ -106,11 +111,16 @@ from app.domain.source_snapshot import (
     segment_fingerprints,
 )
 from app.domain.source_text import SourceLayout, ensure_source_fits
-from app.domain.value_objects import AnalysisJobStatusVO, DocumentFormatVO
+from app.domain.value_objects import (
+    AnalysisExecutionStateVO,
+    AnalysisJobStatusVO,
+    DocumentFormatVO,
+)
 from app.infrastructure.db.session import isolated_uow
 from app.infrastructure.ml_pipeline.factory import analysis_limits, get_document_analyzer
 from app.infrastructure.ml_pipeline.schemas import CONTRACT_VERSION, encode_request
 from app.workers.celery_app import celery_app
+from app.workers.pipeline.cancellation import AnalysisCancelled, run_unless_cancelled
 from app.workers.pipeline.flag_drafts import to_flags
 from app.workers.pipeline.incremental import (
     delta_against,
@@ -211,6 +221,22 @@ async def analyze_document(
         return None
     try:
         return await _run_attempt(job, attempt)
+    except AnalysisCancelled as cancelled:
+        await _acknowledge_stop(
+            job_uuid,
+            AnalysisExecutionLifecycle.worker_stopped(
+                ml_request_abandoned=cancelled.ml_request_abandoned
+            ),
+        )
+        logger.info(
+            "Анализ v2: задача отменена, воркер остановил её",
+            extra={
+                "job_id": job_id,
+                "attempt": attempt,
+                "ml_request_abandoned": cancelled.ml_request_abandoned,
+            },
+        )
+        return None
     except _JobFailed as failure:
         logger.warning(
             "Анализ v2 завершён ошибкой",
@@ -249,7 +275,8 @@ async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
         await finish(job.id, AnalysisJobStatusVO.SUCCESS)
         return None
     document, document_hash = await _load_document(job)
-    fetched = await _fetch_sources(job.sources, job.project_id)
+    await _ensure_not_cancelled(job.id)
+    fetched = await _unless_cancelled(job.id, _fetch_sources(job.sources, job.project_id))
     fetched.failed[:0] = job.unavailable
     fetched.records[:0] = job.unavailable_records
     if not fetched.payloads:
@@ -312,12 +339,20 @@ async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
         del document
         await _store_payload(job.id, attempt, "request", lambda: encode_request(request))
 
+        await _ensure_not_cancelled(job.id)
         started_at = time.perf_counter()
         try:
-            result = await _get_analyzer().analyze(request)
+            result = await _unless_cancelled(
+                job.id, _get_analyzer().analyze(request), ml_request=True
+            )
+        except AnalysisCancelled:
+            _log_call(job.id, attempt, request, started_at, "cancelled")
+            raise
         except LLMTimeoutError as exc:
             _log_call(job.id, attempt, request, started_at, "timeout")
-            return await _retry_or_fail(job.id, attempt, str(exc), fetched=fetched)
+            return await _retry_or_fail(
+                job.id, attempt, str(exc), fetched=fetched, ml_request_abandoned=True
+            )
         except LLMInvalidResponseError as exc:
             _log_call(job.id, attempt, request, started_at, "invalid_response")
             raise _JobFailed("LLM_INVALID_RESPONSE", str(exc)) from exc
@@ -701,6 +736,10 @@ async def _start(job_id: uuid.UUID, source_ids: Sequence[str], attempt: int) -> 
             logger.error("Анализ v2: задача не найдена", extra={"job_id": str(job_id)})
             return None
         if not await uow.jobs.mark_processing_if_active(job_id):
+            # Отмену никто не подтвердил, а попытка, которая её застала, уже не работает:
+            # её запрос к ML мог остаться в обработке.
+            await uow.jobs.acknowledge_stop(job_id, AnalysisExecutionStateVO.UNKNOWN)
+            await uow.commit()
             logger.info(
                 "Анализ v2: задача уже завершена или отменена",
                 extra={"job_id": str(job_id), "attempt": attempt},
@@ -1043,8 +1082,19 @@ async def _retry_or_fail(
     run: PipelineRunSummary | None = None,
     *,
     fetched: _FetchedSources | None = None,
+    ml_request_abandoned: bool = False,
 ) -> RetryLater | None:
+    """Повтор через паузу или failed после последней попытки.
+
+    ml_request_abandoned: попытка не дождалась ответа ML, и сервис мог продолжить
+    вычисление. Отменённая задача не повторяется.
+    """
     if attempt < _settings.analysis_retry_limit:
+        waiting = AnalysisExecutionLifecycle.waiting_retry(
+            ml_request_abandoned=ml_request_abandoned
+        )
+        if not await _pause_for_retry(job_id, waiting):
+            raise AnalysisCancelled(ml_request_abandoned=ml_request_abandoned)
         countdown = _RETRY_BACKOFF_SECONDS * (2**attempt)
         logger.info(
             "Анализ v2: временный сбой конвейера, повтор",
@@ -1057,9 +1107,44 @@ async def _retry_or_fail(
         "LLM_UNAVAILABLE",
         message or None,
         run=run,
+        ml_request_abandoned=ml_request_abandoned,
         **_snapshot_records(fetched),
     )
     return None
+
+
+async def _cancel_requested(job_id: uuid.UUID) -> bool:
+    async with uow_factory() as uow:
+        return await uow.jobs.is_cancelled(job_id)
+
+
+async def _ensure_not_cancelled(job_id: uuid.UUID) -> None:
+    if await _cancel_requested(job_id):
+        raise AnalysisCancelled()
+
+
+async def _unless_cancelled[T](
+    job_id: uuid.UUID, step: Coroutine[Any, Any, T], *, ml_request: bool = False
+) -> T:
+    return await run_unless_cancelled(
+        step,
+        functools.partial(_cancel_requested, job_id),
+        _settings.analysis_cancel_poll_seconds,
+        ml_request=ml_request,
+    )
+
+
+async def _pause_for_retry(job_id: uuid.UUID, state: AnalysisExecutionStateVO) -> bool:
+    async with uow_factory() as uow:
+        paused = await uow.jobs.pause_for_retry(job_id, state)
+        await uow.commit()
+    return paused
+
+
+async def _acknowledge_stop(job_id: uuid.UUID, state: AnalysisExecutionStateVO) -> None:
+    async with uow_factory() as uow:
+        await uow.jobs.acknowledge_stop(job_id, state)
+        await uow.commit()
 
 
 async def finish(
@@ -1077,16 +1162,26 @@ async def finish(
     run_input: RunInput | None = None,
     carry_from: uuid.UUID | None = None,
     merge: MergePlan | None = None,
+    ml_request_abandoned: bool = False,
 ) -> bool:
     """Записать результат одной транзакцией. False — задача уже не активна, ничего не записано.
 
     carry_from: вместо drafts и flags копируется результат этой задачи вместе с решениями
     пользователя. С merge копируются только выбранные им строки, а drafts и flags
     записываются рядом: так выборочная задача получает полный результат.
+    Если задачу успели отменить, результат отбрасывается, а остановка подтверждается:
+    воркер дошёл до записи, значит, сам он больше ничего не делает.
     """
     async with uow_factory() as uow:
         job = await uow.jobs.lock_if_active(job_id)
         if job is None:
+            await uow.jobs.acknowledge_stop(
+                job_id,
+                AnalysisExecutionLifecycle.worker_stopped(
+                    ml_request_abandoned=ml_request_abandoned
+                ),
+            )
+            await uow.commit()
             logger.info(
                 "Анализ v2: задача уже не активна, результат отброшен",
                 extra={"job_id": str(job_id)},
@@ -1187,7 +1282,9 @@ def analyze_document_for_job(
     except SoftTimeLimitExceeded:
         limit = _settings.analysis_task_time_limit_seconds
         logger.warning("Анализ v2: превышен лимит времени задачи", extra={"job_id": job_id})
-        _finish_safely(job_id, "LLM_UNAVAILABLE", f"Анализ не уложился в {limit} с")
+        _finish_safely(
+            job_id, "LLM_UNAVAILABLE", f"Анализ не уложился в {limit} с", ml_request_abandoned=True
+        )
         return
     except Exception:
         # Без этого задача осталась бы в processing навсегда: chord-финализации здесь нет.
@@ -1202,8 +1299,18 @@ def analyze_document_for_job(
         )
 
 
-def _finish_safely(job_id: str, error_code: str, error_message: str) -> None:
+def _finish_safely(
+    job_id: str, error_code: str, error_message: str, *, ml_request_abandoned: bool = False
+) -> None:
     try:
-        _run_async(finish(uuid.UUID(job_id), AnalysisJobStatusVO.FAILED, error_code, error_message))
+        _run_async(
+            finish(
+                uuid.UUID(job_id),
+                AnalysisJobStatusVO.FAILED,
+                error_code,
+                error_message,
+                ml_request_abandoned=ml_request_abandoned,
+            )
+        )
     except Exception:
         logger.exception("Анализ v2: не удалось записать ошибку задачи", extra={"job_id": job_id})

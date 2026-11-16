@@ -28,7 +28,11 @@ from app.domain.interfaces.document_analyzer import (
     AnalysisStatus,
 )
 from app.domain.pipeline_run import failed_block_count
-from app.domain.value_objects import AnalysisJobStatusVO, DocumentStatusVO
+from app.domain.value_objects import (
+    AnalysisExecutionStateVO,
+    AnalysisJobStatusVO,
+    DocumentStatusVO,
+)
 
 _DOCUMENT_TRANSITIONS: dict[DocumentStatusVO, frozenset[DocumentStatusVO]] = {
     DocumentStatusVO.DRAFT: frozenset({DocumentStatusVO.DRAFT, DocumentStatusVO.IN_PROGRESS}),
@@ -266,3 +270,66 @@ def _truncate(message: str) -> str | None:
     return (
         message if len(message) <= _ERROR_MESSAGE_MAX else message[: _ERROR_MESSAGE_MAX - 1] + "…"
     )
+
+
+class AnalysisExecutionLifecycle:
+    """Состояние вычисления задачи рядом с её статусом.
+
+    Статус cancelled фиксирует решение пользователя сразу, а вычисление останавливается
+    позже: воркер замечает отмену и подтверждает, что больше ничего не делает. Пока
+    подтверждения нет, задача остаётся в cancel_requested.
+    """
+
+    STOPPED_STATES = frozenset({AnalysisExecutionStateVO.STOPPED, AnalysisExecutionStateVO.UNKNOWN})
+
+    @classmethod
+    def after_status(
+        cls,
+        state: AnalysisExecutionStateVO | None,
+        previous: object,
+        target: AnalysisJobStatusVO,
+    ) -> AnalysisExecutionStateVO:
+        """Состояние вычисления после перехода статуса previous → target."""
+        if target is AnalysisJobStatusVO.PROCESSING:
+            return AnalysisExecutionStateVO.RUNNING
+        if target is AnalysisJobStatusVO.CANCELLED:
+            return cls._on_cancel(state, previous)
+        if target in AnalysisJobLifecycle.TERMINAL:
+            return AnalysisExecutionStateVO.COMPLETED
+        return state or AnalysisExecutionStateVO.NOT_STARTED
+
+    @staticmethod
+    def worker_stopped(*, ml_request_abandoned: bool) -> AnalysisExecutionStateVO:
+        """Чем закончилась отмена, которую заметил воркер.
+
+        Брошенный запрос к ML даёт unknown: закрытие соединения не останавливает обработку
+        на стороне сервиса.
+        """
+        if ml_request_abandoned:
+            return AnalysisExecutionStateVO.UNKNOWN
+        return AnalysisExecutionStateVO.STOPPED
+
+    @staticmethod
+    def waiting_retry(*, ml_request_abandoned: bool) -> AnalysisExecutionStateVO:
+        """Состояние между попытками: воркер свободен, следующая попытка ещё не началась."""
+        if ml_request_abandoned:
+            return AnalysisExecutionStateVO.UNKNOWN
+        return AnalysisExecutionStateVO.NOT_STARTED
+
+    @staticmethod
+    def _on_cancel(
+        state: AnalysisExecutionStateVO | None, previous: object
+    ) -> AnalysisExecutionStateVO:
+        if state is None:
+            # Задачи, созданные до появления поля, судим по статусу.
+            running = _as_job_status(previous) is AnalysisJobStatusVO.PROCESSING
+            state = (
+                AnalysisExecutionStateVO.RUNNING
+                if running
+                else AnalysisExecutionStateVO.NOT_STARTED
+            )
+        if state is AnalysisExecutionStateVO.RUNNING:
+            return AnalysisExecutionStateVO.CANCEL_REQUESTED
+        if state is AnalysisExecutionStateVO.NOT_STARTED:
+            return AnalysisExecutionStateVO.STOPPED
+        return state

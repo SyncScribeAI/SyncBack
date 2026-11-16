@@ -40,7 +40,7 @@ from app.domain.exceptions import (
 )
 from app.domain.interfaces.llm_client import LLMClient
 from app.domain.lifecycle import AnalysisJobLifecycle
-from app.domain.value_objects import AnalysisJobStatusVO
+from app.domain.value_objects import AnalysisExecutionStateVO, AnalysisJobStatusVO
 from app.infrastructure.db.session import isolated_uow
 from app.infrastructure.llm.factory import get_llm_client
 from app.workers.celery_app import celery_app
@@ -281,6 +281,10 @@ async def _finalize(results: list[dict[str, Any]], job_id: str) -> None:
             logger.error("finalize: job не найден", extra={"job_id": job_id})
             return
         if AnalysisJobLifecycle.is_terminal(job.status):
+            # Финализация идёт после всех задач по источникам: у отменённой задачи больше
+            # ничего не выполняется.
+            await uow.jobs.acknowledge_stop(job.id, AnalysisExecutionStateVO.STOPPED)
+            await uow.commit()
             logger.info(
                 "finalize: задача уже завершена",
                 extra={"job_id": job_id, "status": job.status.value},

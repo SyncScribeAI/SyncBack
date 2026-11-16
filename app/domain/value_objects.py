@@ -64,6 +64,22 @@ class AnalysisJobStatusVO(StrEnum):
 AnalysisJobState = AnalysisJobStatusVO
 
 
+class AnalysisExecutionStateVO(StrEnum):
+    """Что происходит с вычислением задачи, в отличие от результата анализа в status.
+
+    stopped означает, что SyncBack больше ничего не делает и не ждёт запроса к ML.
+    unknown: SyncBack прекратил ожидание запроса к ML, но сервис мог продолжить его
+    обработку, поэтому остановка вычислений не подтверждена.
+    """
+
+    NOT_STARTED = "not_started"
+    RUNNING = "running"
+    CANCEL_REQUESTED = "cancel_requested"
+    STOPPED = "stopped"
+    COMPLETED = "completed"
+    UNKNOWN = "unknown"
+
+
 class UserRoleVO(StrEnum):
     ADMIN = "admin"
     USER = "user"

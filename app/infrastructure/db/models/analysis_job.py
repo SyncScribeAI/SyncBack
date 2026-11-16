@@ -58,6 +58,11 @@ class AnalysisJob(Base):
         # Последняя задача документа: WHERE document_id = ? ORDER BY created_at DESC.
         Index("ix_analysis_jobs_doc_latest", "document_id", "created_at"),
         CheckConstraint("strategy IN ('auto', 'full')", name="ck_analysis_jobs_strategy"),
+        CheckConstraint(
+            "execution_state IN ('not_started', 'running', 'cancel_requested', 'stopped', "
+            "'completed', 'unknown')",
+            name="ck_analysis_jobs_execution_state",
+        ),
         Index(
             "ix_analysis_jobs_baseline_job_id",
             "baseline_job_id",
@@ -111,6 +116,17 @@ class AnalysisJob(Base):
     )
     checked_blocks: Mapped[int | None] = mapped_column(Integer, nullable=True)
     failed_blocks: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Состояние вычисления (AnalysisExecutionStateVO). NULL у задач, созданных до появления
+    # поля: их состояние выводится из status.
+    execution_state: Mapped[str | None] = mapped_column(
+        String(20), nullable=True, default="not_started"
+    )
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    execution_stopped_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

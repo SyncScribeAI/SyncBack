@@ -84,7 +84,11 @@ def _get_file_storage() -> S3FileStorage:
 
 @lru_cache
 def _get_parser_registry() -> DocumentParserRegistry:
-    return DocumentParserRegistry(pdf_max_pages=get_settings().pdf_max_pages)
+    settings = get_settings()
+    return DocumentParserRegistry(
+        pdf_max_pages=settings.pdf_max_pages,
+        docx_table_cells_editable=settings.docx_table_cells_editable,
+    )
 
 
 @lru_cache

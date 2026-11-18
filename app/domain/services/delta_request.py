@@ -11,6 +11,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from itertools import chain
+from typing import Literal
 
 from app.domain.analysis_reuse import (
     Baseline,
@@ -34,8 +35,13 @@ from app.domain.services.delta_selection import (
     reduce_sources,
     select_blocks,
 )
+from app.domain.services.dependency_registry import (
+    document_context_refs,
+    select_by_registry,
+    source_segments,
+)
 from app.domain.services.source_differ import diff_fingerprints
-from app.domain.source_snapshot import SourceSegment
+from app.domain.source_snapshot import SourceSegment, segment_fingerprints
 
 Segments = Sequence[tuple[SourceSegment, int]]
 
@@ -73,6 +79,8 @@ class DeltaRequest:
     # блоками таких флагов.
     changed: frozenset[uuid.UUID]
     evidence_blocks: frozenset[str] = frozenset()
+    # Блоки документа, которые уходят в запрос; None — весь документ контекстом.
+    document_refs: frozenset[str] | None = None
 
     @property
     def calls_model(self) -> bool:
@@ -115,8 +123,26 @@ def build_delta_request(
     flags: list[BaselineFlag],
     policy: DeltaPolicy,
     limits: DeltaLimits,
+    baseline_texts: Sequence[str] | None = None,
+    strategy: Literal["lexical", "registry", "all_blocks"] = "lexical",
+    wide_selection: Literal["full", "all_blocks"] = "full",
+    context_blocks: int | None = None,
+    source_granularity: Literal["paragraph", "line"] = "paragraph",
 ) -> DeltaRequest | DeltaFallback:
     """Выбор блоков и сегментов; DeltaFallback, если выборочная проверка не подходит.
+
+    strategy=lexical — исходный отбор по словам новых сегментов. registry — правила
+    R1–R5 реестра зависимостей (app.domain.services.dependency_registry), нужны тексты
+    прошлых снимков baseline_texts. all_blocks перепроверяет все блоки и сокращает только
+    источники. wide_selection решает, что делать, когда выбрано больше max_blocks_share
+    или место правки неизвестно: полный анализ или все блоки с сокращёнными источниками.
+    context_blocks, если задан, оставляет в запросе только выбранные блоки, их соседей и
+    заголовки; None отправляет весь документ контекстом.
+
+    source_granularity=line разбивает источники по строкам и пунктам для отбора, оценки
+    доли изменений и сокращения источников; нужны тексты прошлых снимков baseline_texts.
+    Хранимые отпечатки остаются абзацными: по ним сверяются основания прошлых правок
+    (changed, evidence_blocks) и правки add на неизменённом основании (base).
 
     Новый абзац, который не совпал ни с одним блоком, может требовать правки add в любом
     месте документа; такой вход проверяется полностью. Пустой sources означает, что
@@ -124,8 +150,27 @@ def build_delta_request(
     модель не с чем, а правила переноса отметят правки, потерявшие основание.
     """
     base = fingerprints.all
-    summary = summarize_delta(base, segments)
     current = frozenset(fp for source in segments for _, fp in source)
+    by_line = source_granularity == "line"
+    if by_line and baseline_texts is None:
+        raise ValueError("Для построчного разбиения нужны тексты прошлых снимков")
+    # Сегменты, по которым считаются доля изменений, отбор и сокращение источников.
+    # Для построчного режима и прошлый, и новый вход разбиваются заново по одному правилу.
+    work_segments: Sequence[Segments] = (
+        [segment_fingerprints(payload.text, by_line=True) for payload in payloads]
+        if by_line
+        else segments
+    )
+    work_base = (
+        frozenset(
+            fp
+            for text in baseline_texts or ()
+            for _, fp in segment_fingerprints(text, by_line=True)
+        )
+        if by_line
+        else base
+    )
+    summary = summarize_delta(work_base, work_segments)
     changed = frozenset(
         row.id
         for row in suggestions
@@ -138,24 +183,52 @@ def build_delta_request(
         if evidence_changed(flag.evidence, fingerprints.by_snapshot, current)
     )
     blocks = checkable_blocks(document)
-    selected = select_blocks(
-        blocks,
-        (
-            segment.text_in(payload.text)
-            for payload, source in zip(payloads, segments, strict=True)
-            for segment, fp in source
-            if fp not in base
-        ),
-        evidence_changed=evidence_blocks,
-        flagged={flag.block_ref for flag in flags},
-        limits=limits,
-    )
+    flagged = {flag.block_ref for flag in flags}
+    every = frozenset(block.ref for block in blocks)
+    unknown_scope = False
+    if strategy == "all_blocks":
+        selected = SelectedBlocks.by_rules(every, {"selected_all_blocks": len(every)})
+    elif strategy == "registry":
+        if baseline_texts is None:
+            raise ValueError("Для отбора по реестру нужны тексты прошлых снимков")
+        chosen = select_by_registry(
+            blocks,
+            [source_segments(text, by_line=by_line) for text in baseline_texts],
+            [source_segments(payload.text, by_line=by_line) for payload in payloads],
+            evidence_changed=evidence_blocks,
+            flagged=flagged,
+            limits=limits,
+        )
+        unknown_scope = chosen.unknown_scope
+        selected = SelectedBlocks.by_rules(chosen.refs, chosen.as_meta())
+    else:
+        selected = select_blocks(
+            blocks,
+            (
+                segment.text_in(payload.text)
+                for payload, source in zip(payloads, work_segments, strict=True)
+                for segment, fp in source
+                if fp not in work_base
+            ),
+            evidence_changed=evidence_blocks,
+            flagged=flagged,
+            limits=limits,
+        )
     fallback = delta_scope_check(
         changed_share=summary.changed_share,
         selected=len(selected.refs),
         checkable=len(blocks),
         policy=policy,
     )
+    wide = fallback is DeltaFallback.BLOCKS_SHARE or unknown_scope
+    if wide and strategy != "all_blocks":
+        if wide_selection == "full":
+            return fallback or DeltaFallback.BLOCKS_SHARE
+        rules = {**(selected.rules or selected.as_meta()), "wide_selection_all_blocks": True}
+        selected = SelectedBlocks.by_rules(every, rules)
+        fallback = None
+    if fallback is DeltaFallback.BLOCKS_SHARE and strategy == "all_blocks":
+        fallback = None
     if fallback is not None:
         return fallback
     if not selected.refs and summary.segments_added:
@@ -163,9 +236,9 @@ def build_delta_request(
     reduced = reduce_sources(
         [
             SourceInput(text=payload.text, segments=source)
-            for payload, source in zip(payloads, segments, strict=True)
+            for payload, source in zip(payloads, work_segments, strict=True)
         ],
-        base,
+        work_base,
         (block.text for block in blocks if block.ref in selected.refs),
         limits,
     )
@@ -180,7 +253,7 @@ def build_delta_request(
         selected=selected,
         sources=sources,
         stats=RunStats(
-            segments_total=sum(len(source) for source in segments),
+            segments_total=sum(len(source) for source in work_segments),
             segments_sent=sum(len(part.segment_indexes) for part in reduced),
             chars_total=sum(len(payload.text) for payload in payloads),
             chars_sent=sum(len(source.text) for source in sources),
@@ -192,6 +265,13 @@ def build_delta_request(
         flags=flags,
         changed=changed,
         evidence_blocks=frozenset(evidence_blocks),
+        document_refs=None
+        if context_blocks is None
+        else document_context_refs(
+            [(block.ref, block.type is DocumentBlockType.HEADING) for block in document.blocks],
+            selected.refs,
+            context_blocks,
+        ),
     )
 
 

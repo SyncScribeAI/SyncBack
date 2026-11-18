@@ -188,6 +188,7 @@ class DocumentExportService:
                     start_offset=s.start_offset,
                     end_offset=s.end_offset,
                     rects=rects_from_json(s.geometry),
+                    block_ref=s.block_id,
                 )
                 for s in page
             )

@@ -270,6 +270,7 @@ class AnalysisJobRepository(IAnalysisJobRepository):
             "provider": run.provider,
             "meta": None if run.meta is None else dict(run.meta),
             "evidence": None if run.evidence is None else dict(run.evidence),
+            "llm_usage": None if run.usage is None else dict(run.usage),
         }
         job.checked_blocks = run.checked_blocks
         job.failed_blocks = run.failed_blocks

@@ -77,6 +77,7 @@ class _Suggestions:
                 start_offset=None,
                 end_offset=None,
                 geometry=None,
+                block_id=None,
             )
         ]
 

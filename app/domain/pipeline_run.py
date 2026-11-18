@@ -30,6 +30,9 @@ class PipelineRunSummary:
     failed_blocks: int | None
     # Счётчики оснований (EvidenceCounters.as_meta); None, пока локатор не отработал.
     evidence: Mapping[str, int] | None = None
+    # Учёт вызовов LLM (LlmUsage.as_meta); None, если провайдер его не сообщил. Хранится
+    # отдельно от meta, чтобы предел META_MAX_BYTES не отрезал счётчики токенов.
+    usage: Mapping[str, Any] | None = None
 
     @property
     def meta_dropped(self) -> bool:
@@ -59,6 +62,7 @@ def summarize_run(
         meta=meta,
         checked_blocks=_counter(result.meta, "checked_blocks"),
         failed_blocks=_counter(result.meta, "errors"),
+        usage=None if result.usage is None else result.usage.as_meta(),
     )
 
 

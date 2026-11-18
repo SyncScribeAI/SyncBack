@@ -55,8 +55,10 @@ def _drafts(blocks: tuple[BlockPayload, ...], *changes: ProposedChange) -> list[
     return map_result(result, blocks).suggestions
 
 
-def _ten_days(ref: str, new_text: str = "5 дней") -> ProposedChange:
-    return ProposedChange("modify", ref, "10 дней", new_text, rationale="Решение встречи")
+def _ten_days(ref: str, new_text: str = "5 дней", occurrence: int | None = None) -> ProposedChange:
+    return ProposedChange(
+        "modify", ref, "10 дней", new_text, rationale="Решение встречи", occurrence=occurrence
+    )
 
 
 # --- group_key ----------------------------------------------------------------------
@@ -82,7 +84,10 @@ def test_single_change_has_no_group_and_pairs_share_key() -> None:
     blocks = _blocks()
     first, second = _ref(blocks, "Ответ"), _ref(blocks, "Возврат")
     drafts = _drafts(
-        blocks, _ten_days(first), _ten_days(second), _ten_days(first, new_text="7 дней")
+        blocks,
+        _ten_days(first, occurrence=1),
+        _ten_days(second),
+        _ten_days(first, new_text="7 дней", occurrence=2),
     )
     keyed = assign_group_keys(drafts)
     assert keyed[0].group_key is not None
@@ -120,7 +125,11 @@ def test_propagation_skips_places_already_changed_by_model() -> None:
     blocks = _blocks()
     first = _ref(blocks, "Ответ")
     # Модель уже исправила оба вхождения в первом абзаце, одно — другим текстом.
-    model = _drafts(blocks, _ten_days(first), _ten_days(first, new_text="7 дней"))
+    model = _drafts(
+        blocks,
+        _ten_days(first, occurrence=1),
+        _ten_days(first, new_text="7 дней", occurrence=2),
+    )
     extra = propagate_exact(model, blocks, LIMITS)
     occupied = {(d.start_offset, d.end_offset) for d in model}
     assert not occupied & {(d.start_offset, d.end_offset) for d in extra}

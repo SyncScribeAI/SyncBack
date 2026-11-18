@@ -68,6 +68,8 @@ class SuggestionProtocol(Protocol):
     # Границы original_text в plain_text; None у правок прежнего конвейера.
     start_offset: int | None
     end_offset: int | None
+    # Блок документа, к которому привязана правка; None у правок прежнего конвейера.
+    block_id: str | None
     status: SuggestionStatusVO
     decided_by: uuid.UUID | None
     decided_at: datetime | None

@@ -26,6 +26,9 @@ _FINGERPRINT_BYTES = 8
 _FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}(?:\s|$)")
 _LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d{1,9}[.)])\s+\S")
+# Многоуровневый номер пункта вроде «300.1.» или «4.2)»: в построчном разбиении такой
+# пункт открывает свой сегмент так же, как пункт списка.
+_NUMBERED_ITEM_RE = re.compile(r"^\s*\d{1,9}(?:\.\d{1,9})*[.)]\s+\S")
 # Маркеры разметки в начале строки не меняют смысл сегмента: «- Лимит 50 МБ» и
 # «Лимит 50 МБ» — один и тот же факт, перенесённый из абзаца в список.
 _LEADING_MARKUP_RE = re.compile(r"^(?:\s*(?:#{1,6}|[-*+>]|\d{1,9}[.)])\s+)+", re.MULTILINE)
@@ -72,13 +75,19 @@ class SourceSegment:
         return text[self.start : self.end]
 
 
-def iter_segments(text: str) -> Iterator[SourceSegment]:
+def iter_segments(text: str, *, by_line: bool = False) -> Iterator[SourceSegment]:
     """Сегменты текста снимка за один проход по строкам; O(n) времени, O(1) памяти сверх
     текущего сегмента.
 
     Пустая строка закрывает сегмент. Заголовок и строка таблицы всегда отдельные сегменты;
     пункт списка открывает новый сегмент, а строки его продолжения входят в него. Код в
     ограждении — один сегмент вместе с ограждением, как в разборе Markdown.
+
+    by_line=True даёт построчное разбиение для отбора блоков и сокращения источников:
+    каждая непустая строка становится сегментом, многоуровневые номера пунктов
+    распознаются как пункты, а строка с отступом после пункта остаётся его продолжением.
+    Хранимые отпечатки снимков строятся без by_line, чтобы прошлые снимки сравнивались
+    с новыми по одному правилу.
     """
     index = 0
     kind: SegmentKind | None = None
@@ -109,11 +118,18 @@ def iter_segments(text: str) -> Iterator[SourceSegment]:
                 kind = None
         else:
             fence_match = _FENCE_RE.match(line)
-            line_kind = _line_kind(line, stripped)
+            line_kind = _line_kind(line, stripped, by_line=by_line)
+            continuation = (
+                by_line
+                and kind is SegmentKind.LIST_ITEM
+                and line_kind is SegmentKind.PARAGRAPH
+                and line[:1].isspace()
+            )
             opens_new = (
                 fence_match is not None
                 or line_kind in (SegmentKind.HEADING, SegmentKind.TABLE_ROW, SegmentKind.LIST_ITEM)
                 or kind in (SegmentKind.HEADING, SegmentKind.TABLE_ROW)
+                or (by_line and not continuation)
             )
             if kind is not None and opens_new:
                 yield SourceSegment(index, start, end, kind)
@@ -137,12 +153,12 @@ def iter_segments(text: str) -> Iterator[SourceSegment]:
         yield SourceSegment(index, start, end, kind)
 
 
-def _line_kind(line: str, stripped: str) -> SegmentKind:
+def _line_kind(line: str, stripped: str, *, by_line: bool = False) -> SegmentKind:
     if _HEADING_RE.match(line):
         return SegmentKind.HEADING
     if len(stripped) > 1 and stripped.startswith("|") and stripped.endswith("|"):
         return SegmentKind.TABLE_ROW
-    if _LIST_ITEM_RE.match(line):
+    if _LIST_ITEM_RE.match(line) or (by_line and _NUMBERED_ITEM_RE.match(line)):
         return SegmentKind.LIST_ITEM
     return SegmentKind.PARAGRAPH
 
@@ -166,8 +182,11 @@ def fingerprint(segment_text: str) -> int:
     return int.from_bytes(digest, "big")
 
 
-def segment_fingerprints(text: str) -> list[tuple[SourceSegment, int]]:
-    return [(segment, fingerprint(segment.text_in(text))) for segment in iter_segments(text)]
+def segment_fingerprints(text: str, *, by_line: bool = False) -> list[tuple[SourceSegment, int]]:
+    return [
+        (segment, fingerprint(segment.text_in(text)))
+        for segment in iter_segments(text, by_line=by_line)
+    ]
 
 
 def pack_fingerprints(fingerprints: Iterable[int]) -> bytes:

@@ -21,8 +21,8 @@ import heapq
 import math
 import re
 from collections import Counter
-from collections.abc import Collection, Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 
 from app.domain.source_snapshot import SegmentKind, SourceSegment
 
@@ -50,6 +50,10 @@ class DeltaLimits:
     context_segments: int = 2
     support_segments: int = 3
     stem_chars: int = 6
+    # Опора по сильным токенам: неизменённый сегмент уходит в запрос, если делит с
+    # выбранным блоком не меньше strong_support_tokens редких токенов с цифрами
+    # (идентификатор и значение). 0 отключает правило.
+    strong_support_tokens: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,8 +164,16 @@ class SelectedBlocks:
     by_token: int
     by_evidence: int
     by_flag: int
+    # Отбор другим способом (реестр зависимостей или все блоки): вклад его правил.
+    rules: Mapping[str, int | bool] | None = field(default=None)
 
-    def as_meta(self) -> dict[str, int]:
+    @classmethod
+    def by_rules(cls, refs: frozenset[str], rules: Mapping[str, int | bool]) -> SelectedBlocks:
+        return cls(refs=refs, by_overlap=0, by_token=0, by_evidence=0, by_flag=0, rules=rules)
+
+    def as_meta(self) -> dict[str, int | bool]:
+        if self.rules is not None:
+            return {"blocks_selected": len(self.refs), **self.rules}
         return {
             "blocks_selected": len(self.refs),
             "selected_by_overlap": self.by_overlap,
@@ -263,14 +275,30 @@ def reduce_sources(
             chosen[number].update(range(low, high))
         headings.append(source_headings)
 
-    if unchanged and limits.support_segments:
+    if unchanged and (limits.support_segments or limits.strong_support_tokens):
         index = TermIndex(unchanged_terms)
+        strong_holders: dict[str, list[int]] = {}
+        if limits.strong_support_tokens:
+            for position, terms in enumerate(unchanged_terms):
+                for token in terms.strong:
+                    strong_holders.setdefault(token, []).append(position)
         del unchanged_terms
         for text in selected_texts:
             terms = text_terms(text, limits.stem_chars)
             for position in index.best(terms, limits.support_segments, None):
                 number, segment_position = unchanged[position]
                 chosen[number].add(segment_position)
+            if limits.strong_support_tokens:
+                # Счёт общих редких токенов: O(сильные токены блока × их вхождения).
+                shared: Counter[int] = Counter()
+                for token in terms.strong:
+                    holders = strong_holders.get(token, ())
+                    if 0 < len(holders) and not index.is_common(token):
+                        shared.update(holders)
+                for position, count in shared.items():
+                    if count >= limits.strong_support_tokens:
+                        number, segment_position = unchanged[position]
+                        chosen[number].add(segment_position)
 
     reduced: list[ReducedSource] = []
     for number, source in enumerate(sources):

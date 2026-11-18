@@ -67,7 +67,9 @@ class DocumentBlocksBuilder:
         editable: bool | None = None,
     ) -> None:
         """editable=None — правило по типу блока; False — формат знает, что фрагмент
-        служебный (front matter, HTML, разделитель), хотя тип у него общий OTHER."""
+        служебный (front matter, HTML, разделитель), хотя тип у него общий OTHER; True —
+        формат умеет править фрагмент, хотя тип по умолчанию только для чтения (абзац
+        ячейки DOCX правится внутри своих ранов и структуру таблицы не трогает)."""
         if start_offset >= end_offset:
             return
         if start_offset < self._last_end or end_offset > self._text_length:
@@ -82,7 +84,7 @@ class DocumentBlocksBuilder:
                 position=position,
                 start_offset=start_offset,
                 end_offset=end_offset,
-                editable=(block_type not in _READ_ONLY_TYPES) and editable is not False,
+                editable=(block_type not in _READ_ONLY_TYPES) if editable is None else editable,
                 heading_level=heading_level if block_type is DocumentBlockType.HEADING else None,
             )
         )

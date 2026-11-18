@@ -46,15 +46,17 @@ def build_analysis_request(
     sources: Iterable[SourcePayload],
     limits: AnalysisLimits = AnalysisLimits(),
     editable: Collection[str] | None = None,
+    include: Collection[str] | None = None,
 ) -> AnalysisRequest:
     """O(B + K): один проход по блокам и источникам, уникальность ref — через set.
 
     request_id включает номер попытки: ответ на прошлую попытку, пришедший с опозданием,
     не будет принят за ответ на текущую. editable сужает проверяемые блоки до выбранных
     инкрементальным анализом; остальные уходят контекстом, чтобы модель видела документ
-    целиком.
+    целиком. include, если задан, оставляет в запросе только эти блоки: выборочный запрос
+    с сокращённым контекстом документа.
     """
-    blocks = _block_payloads(document, limits, editable)
+    blocks = _block_payloads(document, limits, editable, include)
     source_payloads = tuple(sources)
     if limits.max_sources is not None and len(source_payloads) > limits.max_sources:
         raise LLMInputTooLargeError(
@@ -71,7 +73,10 @@ def build_analysis_request(
 
 
 def _block_payloads(
-    document: DocumentInput, limits: AnalysisLimits, editable: Collection[str] | None
+    document: DocumentInput,
+    limits: AnalysisLimits,
+    editable: Collection[str] | None,
+    include: Collection[str] | None = None,
 ) -> tuple[BlockPayload, ...]:
     seen: set[str] = set()
     payloads: list[BlockPayload] = []
@@ -79,6 +84,8 @@ def _block_payloads(
         if block.ref in seen:
             raise ValueError(f"Повторяющийся ref блока: {block.ref}")
         seen.add(block.ref)
+        if include is not None and block.ref not in include:
+            continue
         length = block.end_offset - block.start_offset
         # Длину проверяем по смещениям до среза: слишком длинный блок не копируется.
         if limits.max_block_chars is not None and length > limits.max_block_chars:

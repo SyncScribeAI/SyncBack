@@ -142,6 +142,8 @@ def _change_and_flag(request: AnalysisRequest) -> AnalysisResult:
                 block_ref=paragraph.ref,
                 old_text="тридцати дней",
                 new_text="четырнадцати дней",
+                # В абзаце фикстуры фраза повторяется: правка адресует первое вхождение.
+                occurrence=1,
             ),
             ProposedChange(
                 kind="add",

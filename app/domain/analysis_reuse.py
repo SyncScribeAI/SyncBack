@@ -160,6 +160,7 @@ def analysis_input_hash(
     provider: str,
     document_hash: str,
     sources: Iterable[tuple[str, str, str, str]],
+    pipeline_version: str = "",
 ) -> str:
     """sha256 входа; четвёрки (id источника, тип, имя, хэш снимка) сортируются.
 
@@ -169,9 +170,15 @@ def analysis_input_hash(
     ссылаются на конкретный источник: пересозданный источник с тем же текстом должен
     дать новый вход. JSON вместо склейки строк исключает совпадение разных входов при
     именах с разделителями.
+
+    Версия конвейера (модель, промпты, алгоритмы контекста) входит в хэш, только если
+    задана: иначе после развёртывания все прошлые задачи перестали бы совпадать.
     """
+    parts: list[object] = [contract_version, provider, document_hash, sorted(sources)]
+    if pipeline_version:
+        parts.append(pipeline_version)
     payload = json.dumps(
-        [contract_version, provider, document_hash, sorted(sources)],
+        parts,
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -271,7 +278,7 @@ class RunInput:
     document_hash: str | None = None
     selective: bool = False
     fallback: DeltaFallback | None = None
-    selection: Mapping[str, int] | None = None
+    selection: Mapping[str, int | bool] | None = None
 
     @property
     def mode(self) -> str:

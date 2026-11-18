@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from app.domain.baseline_result import BaselineFlag, BaselineSuggestion, EvidenceRef
 from app.domain.interfaces.document_analyzer import ChangeKind
 from app.domain.services.analysis_result_mapper import FlagDraft, SuggestionDraft
+from app.domain.value_objects import FlagOriginVO
 
 EVIDENCE_REMOVED_REASON = "evidence_removed"
 EVIDENCE_REMOVED_TEXT = "Основание правки удалено из источника, проверьте вручную"
@@ -142,7 +143,10 @@ def plan_merge(
         if (flag.block_ref, flag.reason) in kept_flags:
             continue
         plan.flags.append(flag)
-        answered.add(flag.block_ref)
+        # Флаг отказанной правки пока скрыт от пользователя и не заменяет флаг об
+        # удалённом основании.
+        if flag.origin is FlagOriginVO.ANALYSIS:
+            answered.add(flag.block_ref)
     for block_ref, section_ref in lost_evidence.items():
         text = blocks.get(block_ref)
         if block_ref in answered or text is None:

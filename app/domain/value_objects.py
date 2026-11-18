@@ -43,6 +43,13 @@ class SuggestionOriginVO(StrEnum):
     PROPAGATED = "propagated"
 
 
+class FlagOriginVO(StrEnum):
+    """Откуда флаг: из ответа анализа или из правки, которую бэкенд не смог привязать."""
+
+    ANALYSIS = "analysis"
+    REFUSED_EDIT = "refused_edit"
+
+
 class FlagStatusVO(StrEnum):
     """Флаг «проверьте вручную»: правки нет, есть только отметка, что место просмотрено."""
 

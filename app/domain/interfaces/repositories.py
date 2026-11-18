@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, TypedDict, TypeVar
 
@@ -28,6 +28,7 @@ from app.domain.value_objects import (
     AnalysisJobStatusVO,
     DocumentFormatVO,
     DocumentStatusVO,
+    FlagOriginVO,
     FlagStatusVO,
     ProjectContentCounts,
     SourceScopeVO,
@@ -303,8 +304,12 @@ class IAnalysisFlagRepository(ABC):
     async def get_by_id(self, flag_id: uuid.UUID) -> AnalysisFlag | None: ...
 
     @abstractmethod
-    async def list_by_analysis_job(self, analysis_job_id: uuid.UUID) -> list[AnalysisFlag]:
-        """Все флаги анализа в порядке ответа конвейера (position)."""
+    async def list_by_analysis_job(
+        self,
+        analysis_job_id: uuid.UUID,
+        origins: Collection[FlagOriginVO] | None = None,
+    ) -> list[AnalysisFlag]:
+        """Флаги анализа в порядке ответа конвейера (position); origins сужает выборку."""
         ...
 
     @abstractmethod

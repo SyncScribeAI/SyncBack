@@ -86,8 +86,10 @@ class AnalysisFlagProtocol(Protocol):
     id: uuid.UUID
     analysis_job_id: uuid.UUID
     document_id: uuid.UUID
-    # У ORM-модели строка с CHECK, а не enum PostgreSQL; домен сравнивает с FlagStatusVO.
+    # У ORM-модели строки с CHECK, а не enum PostgreSQL; домен сравнивает с FlagStatusVO
+    # и FlagOriginVO.
     status: str
+    origin: str
     decided_by: uuid.UUID | None
     decided_at: datetime | None
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterable, Mapping
+from dataclasses import asdict
 from typing import Any
 
 from app.domain.document_geometry import rects_to_json
@@ -37,6 +38,8 @@ def to_flags(
             quotes=_quotes(draft, rows),
             position=draft.position,
             geometry=rects_to_json(draft.geometry),
+            origin=draft.origin.value,
+            proposal=None if draft.proposal is None else asdict(draft.proposal),
         )
         for draft in drafts
     ]

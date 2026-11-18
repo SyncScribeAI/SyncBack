@@ -23,6 +23,11 @@ start_offset/end_offset — границы original_text в plain_text доку�
 привязываются: вторая отбрасывается. Добавления с общим якорем допустимы: несколько
 абзацев после одного якоря — законный ответ.
 
+Правка, которую не удалось привязать к месту в существующем редактируемом блоке, не
+пропадает: она становится флагом «проверьте вручную» с происхождением refused_edit, текстом
+предложенной замены и причиной отказа. Такие флаги идут после флагов анализа и под тот же
+лимит, чтобы не вытеснять их.
+
 По каждому исходному предложению маппер оставляет запись в outcomes: привязано или нет, с
 причиной и границами. По ним считаются доли корректных и отказанных привязок, поэтому
 в outcomes попадают все предложения, а не только сохранённые.
@@ -55,7 +60,7 @@ from app.domain.services.edit_locator import (
     locate,
     occurrences,
 )
-from app.domain.value_objects import SuggestionOriginVO
+from app.domain.value_objects import FlagOriginVO, SuggestionOriginVO
 
 NO_SECTION = "Без раздела"
 # Длина колонки suggestions.section_ref.
@@ -63,6 +68,19 @@ _SECTION_REF_MAX = 500
 # Длина колонки analysis_flags.reason; причина — код вроде source_conflict, не текст.
 _FLAG_REASON_MAX = 64
 _KNOWN_KINDS = frozenset(kind.value for kind in ChangeKind)
+# Отказы привязки, после которых правку стоит показать человеку: блок есть и редактируется,
+# но место в нём не определено однозначно. Неполный ответ модели флагом не становится.
+_REFUSALS_TO_FLAG = frozenset(
+    {
+        LocateRefusal.AMBIGUOUS.value,
+        LocateRefusal.CONTEXT_MISMATCH.value,
+        LocateRefusal.INVALID_OCCURRENCE.value,
+        LocateRefusal.TAKEN.value,
+        LocateRefusal.NOT_IN_BLOCK.value,
+        "anchor_not_in_block",
+    }
+)
+_REFUSED_FLAG_PREFIX = "edit_"
 # Блок, тип, old_text и new_text: правки с одинаковым ключом взаимозаменяемы.
 _TwinKey = tuple[str, str, str, str | None]
 
@@ -89,6 +107,16 @@ class SuggestionDraft:
 
 
 @dataclass(frozen=True, slots=True)
+class RefusedEdit:
+    """Правка, которую не удалось привязать: что предлагалось и почему не поставлено."""
+
+    kind: str
+    old_text: str
+    new_text: str | None
+    refusal: str
+
+
+@dataclass(frozen=True, slots=True)
 class FlagDraft:
     block_ref: str
     section_ref: str
@@ -99,6 +127,8 @@ class FlagDraft:
     position: int
     evidence: tuple[Evidence, ...] = ()
     geometry: tuple[PageRect, ...] = ()
+    origin: FlagOriginVO = FlagOriginVO.ANALYSIS
+    proposal: RefusedEdit | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,10 +177,13 @@ def map_result(
     mapped = MappedResult()
     taken: dict[tuple[str, str], set[int]] = {}
     twins = _identical_without_address(result.suggestions)
+    refused: list[tuple[ProposedChange, str]] = []
     for number, change in enumerate(result.suggestions):
         draft_or_reason = _to_suggestion(change, index, taken, twins, len(mapped.suggestions))
         if isinstance(draft_or_reason, str):
             mapped.dropped[draft_or_reason] = mapped.dropped.get(draft_or_reason, 0) + 1
+            if draft_or_reason in _REFUSALS_TO_FLAG:
+                refused.append((change, draft_or_reason))
             mapped.outcomes.append(
                 ProposalOutcome(number, change.block_ref, change.kind, False, draft_or_reason)
             )
@@ -191,7 +224,38 @@ def map_result(
                 position=len(mapped.flags),
             )
         )
+    for change, refusal in refused:
+        if max_flags is not None and len(mapped.flags) >= max_flags:
+            mapped.dropped["refused_flags_over_limit"] = (
+                mapped.dropped.get("refused_flags_over_limit", 0) + 1
+            )
+            continue
+        mapped.flags.append(
+            _refused_flag(change, refusal, index[change.block_ref], len(mapped.flags))
+        )
     return mapped
+
+
+def _refused_flag(
+    change: ProposedChange, refusal: str, context: BlockContext, position: int
+) -> FlagDraft:
+    is_add = change.kind == ChangeKind.ADD.value
+    return FlagDraft(
+        block_ref=change.block_ref,
+        section_ref=context.section_ref,
+        reason=(_REFUSED_FLAG_PREFIX + refusal)[:_FLAG_REASON_MAX],
+        original_text=context.block.text,
+        rationale=change.rationale,
+        quotes=change.quotes,
+        position=position,
+        origin=FlagOriginVO.REFUSED_EDIT,
+        proposal=RefusedEdit(
+            kind=change.kind,
+            old_text=(change.anchor_text if is_add else change.old_text) or "",
+            new_text=change.new_text,
+            refusal=refusal,
+        ),
+    )
 
 
 def index_blocks(blocks: Iterable[BlockPayload]) -> dict[str, BlockContext]:

@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.baseline_result import BaselineFlag, evidence_refs
 from app.domain.interfaces.repositories import IAnalysisFlagRepository
-from app.domain.value_objects import FlagStatusVO
+from app.domain.value_objects import FlagOriginVO, FlagStatusVO
 from app.infrastructure.db.models.analysis_flag import AnalysisFlag
 from app.infrastructure.db.repositories.carry_over import copy_job_rows
 
@@ -65,11 +65,16 @@ class AnalysisFlagRepository(IAnalysisFlagRepository):
     async def get_by_id(self, flag_id: uuid.UUID) -> AnalysisFlag | None:
         return await self._session.get(AnalysisFlag, flag_id)
 
-    async def list_by_analysis_job(self, analysis_job_id: uuid.UUID) -> list[AnalysisFlag]:
+    async def list_by_analysis_job(
+        self,
+        analysis_job_id: uuid.UUID,
+        origins: Collection[FlagOriginVO] | None = None,
+    ) -> list[AnalysisFlag]:
+        stmt = select(AnalysisFlag).where(AnalysisFlag.analysis_job_id == analysis_job_id)
+        if origins is not None:
+            stmt = stmt.where(AnalysisFlag.origin.in_([origin.value for origin in origins]))
         result = await self._session.execute(
-            select(AnalysisFlag)
-            .where(AnalysisFlag.analysis_job_id == analysis_job_id)
-            .order_by(AnalysisFlag.position.asc(), AnalysisFlag.id.asc())
+            stmt.order_by(AnalysisFlag.position.asc(), AnalysisFlag.id.asc())
         )
         return list(result.scalars().all())
 

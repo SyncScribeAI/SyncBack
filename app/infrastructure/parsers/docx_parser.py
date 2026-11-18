@@ -27,12 +27,18 @@ DOCX_PARAGRAPHS_LOCATOR = "docx_paragraphs"
 
 
 class DocxParser:
+    def __init__(self, *, table_cells_editable: bool = False) -> None:
+        # Абзацы ячеек экспортёр правит так же, как абзацы тела: обход один и тот же
+        # (iter_docx_paragraphs). Пока сценарий таблиц не проверен на фронте, правка ячеек
+        # включается настройкой.
+        self._table_cells_editable = table_cells_editable
+
     def parse(self, raw_bytes: bytes) -> ParsedDocument:
         docx_document = DocxDocument(io.BytesIO(raw_bytes))
         sections: list[DocumentSection] = []
         text_parts: list[str] = []
         # Границы блоков копятся до сборки plain_text: сборщику нужна итоговая длина текста.
-        block_spans: list[tuple[DocumentBlockType, int, int, int | None]] = []
+        block_spans: list[tuple[DocumentBlockType, int, int, int | None, bool | None]] = []
         offset = 0
         for item in iter_docx_paragraphs(docx_document):
             paragraph = item.paragraph
@@ -51,11 +57,13 @@ class DocxParser:
             content = paragraph_text.strip()
             if content:
                 start = offset + (len(paragraph_text) - len(paragraph_text.lstrip()))
+                editable: bool | None = None
                 if item.in_table:
                     block_type, level = DocumentBlockType.TABLE, None
+                    editable = self._table_cells_editable or None
                 else:
                     block_type, level = _classify(paragraph, style_name)
-                block_spans.append((block_type, start, start + len(content), level))
+                block_spans.append((block_type, start, start + len(content), level, editable))
             text_parts.append(paragraph_text)
             offset += len(paragraph_text) + 1
         plain_text = "\n".join(text_parts)
@@ -64,8 +72,8 @@ class DocxParser:
                 sections[i + 1].start_offset if i + 1 < len(sections) else len(plain_text)
             )
         builder = DocumentBlocksBuilder(len(plain_text))
-        for block_type, start, end, level in block_spans:
-            builder.add(block_type, start, end, heading_level=level)
+        for block_type, start, end, level, editable in block_spans:
+            builder.add(block_type, start, end, heading_level=level, editable=editable)
         return ParsedDocument(plain_text=plain_text, sections=sections, blocks=builder.build())
 
     def extract_source_text(self, raw_bytes: bytes) -> str:

@@ -96,6 +96,43 @@ async def load_baseline_fingerprints(
     return BaselineFingerprints(all=frozenset(base), by_snapshot=by_snapshot)
 
 
+async def load_baseline_texts(
+    storage: FileStorage,
+    baseline_sources: Sequence[JobSourceSnapshot],
+    snapshots: Sequence[SnapshotDraft],
+    job_id: uuid.UUID,
+) -> list[str] | None:
+    """Тексты прошлых снимков для реестра зависимостей; None, если хоть один не прочитан.
+
+    Снимок с тем же хэшем, что у текущего, берётся из памяти. Порядок совпадает с
+    baseline_sources, повторный снимок читается один раз.
+    """
+    current = {snapshot.content_hash: snapshot for snapshot in snapshots}
+    texts: list[str] = []
+    seen: set[uuid.UUID] = set()
+    try:
+        for source in baseline_sources:
+            snapshot = source.snapshot
+            if snapshot is None or snapshot.id in seen:
+                continue
+            seen.add(snapshot.id)
+            same = current.get(snapshot.content_hash)
+            if same is not None:
+                texts.append(same.text)
+            else:
+                texts.append((await storage.download(snapshot.storage_key)).decode("utf-8"))
+    except SoftTimeLimitExceeded:
+        raise
+    except Exception:
+        logger.warning(
+            "Анализ v2: тексты прошлого входа не прочитаны",
+            exc_info=True,
+            extra={"job_id": str(job_id)},
+        )
+        return None
+    return texts
+
+
 async def delta_against(
     storage: FileStorage,
     baseline_sources: Sequence[JobSourceSnapshot],

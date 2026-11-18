@@ -30,6 +30,7 @@ from app.domain.interfaces.document_analyzer import (
     ProposedChange,
     ReviewFlag,
 )
+from app.domain.llm_usage import LlmUsage, usage_from_records
 from app.infrastructure.ml_pipeline.rationale_quotes import parse_rationale_quotes
 
 CONTRACT_VERSION = "2.0"
@@ -97,6 +98,18 @@ class _SuggestionSchema(_Schema):
     # В контракте 2.0 поля нет; когда harness начнёт его отдавать, оно важнее разбора
     # строки обоснования.
     quotes: list[_QuoteSchema] | None = None
+    # Необязательные поля адреса: старые ответы без них остаются валидными.
+    context_before: str | None = None
+    context_after: str | None = None
+    # Any: неверный номер не должен ронять разбор всего ответа. 0 и отрицательные числа
+    # значат «номер неизвестен», как и отсутствие поля: правку тогда адресует контекст.
+    occurrence: Any = None
+
+    def to_occurrence(self) -> int | None:
+        value = self.occurrence
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            return None
+        return value
 
     def to_quotes(self, source_names: Sequence[str]) -> tuple[Quote, ...]:
         if self.quotes is not None:
@@ -164,7 +177,16 @@ def _describe(exc: ValidationError) -> str:
     return f"Ответ ML не по контракту {CONTRACT_VERSION}: ошибок {len(errors)}, первая — {location} ({first['type']})"
 
 
+def usage_from_meta(meta: Mapping[str, Any]) -> LlmUsage | None:
+    """meta.llm_calls → расход; None, если конвейер вызовы не перечислил."""
+    records = meta.get("llm_calls")
+    if not isinstance(records, list):
+        return None
+    return usage_from_records(records)
+
+
 def _to_result(parsed: _ResponseSchema, source_names: Sequence[str]) -> AnalysisResult:
+    usage = usage_from_meta(parsed.meta)
     if parsed.status == "failed":
         error = parsed.error or _ErrorSchema()
         code = (
@@ -176,6 +198,7 @@ def _to_result(parsed: _ResponseSchema, source_names: Sequence[str]) -> Analysis
             status=AnalysisStatus.FAILED,
             meta=parsed.meta,
             error=AnalysisError(code=code, message=error.message),
+            usage=usage,
         )
     return AnalysisResult(
         status=AnalysisStatus.COMPLETED,
@@ -189,6 +212,9 @@ def _to_result(parsed: _ResponseSchema, source_names: Sequence[str]) -> Analysis
                 rationale=item.rationale,
                 confidence=item.confidence_score,
                 quotes=item.to_quotes(source_names),
+                context_before=item.context_before,
+                context_after=item.context_after,
+                occurrence=item.to_occurrence(),
             )
             for item in parsed.suggestions
         ),
@@ -203,4 +229,5 @@ def _to_result(parsed: _ResponseSchema, source_names: Sequence[str]) -> Analysis
             for flag in parsed.flags
         ),
         meta=parsed.meta,
+        usage=usage,
     )

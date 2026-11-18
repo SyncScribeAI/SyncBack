@@ -17,6 +17,7 @@ from typing import Any, Protocol
 from app.domain.evidence import Quote
 from app.domain.interfaces.document_parser import DocumentBlockType
 from app.domain.interfaces.source_connector import SourceKind
+from app.domain.llm_usage import LlmUsage
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +93,12 @@ class ProposedChange:
     confidence: float | None = None
     # Цитаты источников, на которые опирается правка; пусто, если их не удалось извлечь.
     quotes: tuple[Quote, ...] = ()
+    # Адрес фрагмента внутри блока по схеме exact + prefix + suffix (W3C Web Annotation):
+    # текст сразу до и сразу после old_text и номер вхождения old_text в блоке, с 1.
+    # Без них неоднозначный old_text не привязывается.
+    context_before: str | None = None
+    context_after: str | None = None
+    occurrence: int | None = None
 
 
 # Цитата флага и цитата правки устроены одинаково и проходят через один локатор.
@@ -138,6 +145,8 @@ class AnalysisResult:
     flags: tuple[ReviewFlag, ...] = ()
     meta: Mapping[str, Any] = field(default_factory=dict)
     error: AnalysisError | None = None
+    # None — провайдер расход не сообщает; это не то же самое, что ноль токенов.
+    usage: LlmUsage | None = None
 
 
 class DocumentAnalyzer(Protocol):

@@ -147,9 +147,18 @@ class Settings(BaseSettings):
     analysis_max_sources: int = Field(default=20, gt=0)
     analysis_source_fetch_concurrency: int = Field(default=4, gt=0)
     analysis_store_payloads: bool = False
+    # Версия конвейера: модель, промпты, алгоритмы контекста и отбора. Входит в хэш входа,
+    # чтобы после смены промпта задача не получила перенесённый старый результат. Пустая
+    # строка сохраняет прежние хэши.
+    analysis_pipeline_version: str = ""
+    # Правки в абзацах ячеек DOCX. Выключено, пока сценарий таблиц не проверен на фронте.
+    docx_table_cells_editable: bool = False
     # Флаги «проверьте вручную» целиком уходят в агрегат редактора; лишние отбрасываются
     # с предупреждением в логе, чтобы ответ GET /editor оставался ограниченным.
     analysis_max_flags: int = Field(default=500, gt=0, le=5000)
+    # Флаги правок, которые бэкенд не смог однозначно привязать к месту блока. Они
+    # сохраняются всегда, а в API попадают только при true: интерфейс их пока не показывает.
+    analysis_refused_edit_flags_visible: bool = False
     # Доля слов цитаты, которая должна найтись в сегменте источника, чтобы сегмент считался
     # её основанием. [гипотеза] 0.6 уточняется по первым реальным прогонам.
     analysis_evidence_min_containment: float = Field(default=0.6, gt=0, le=1)
@@ -174,9 +183,24 @@ class Settings(BaseSettings):
     # Соседи изменённого сегмента с каждой стороны и опорные неизменённые сегменты на блок.
     analysis_delta_context_segments: int = Field(default=2, ge=0, le=20)
     analysis_delta_support_segments: int = Field(default=3, ge=0, le=50)
+    # Неизменённый сегмент источника идёт опорой блока, если делит с ним столько редких
+    # токенов с цифрами (идентификатор узла и значение); 0 отключает правило.
+    analysis_delta_strong_support_tokens: int = Field(default=0, ge=0, le=10)
     # Доля выборочных задач, после которых тот же вход проверяется полным анализом, а
     # расхождение пишется в meta задачи. 0 отключает аудит: он удваивает вызовы модели.
     analysis_delta_audit_rate: float = Field(default=0.0, ge=0, le=1)
+    # Способ отбора блоков: lexical по словам новых сегментов, registry по реестру
+    # зависимостей от прошлого входа (правила R1–R5), all_blocks без отбора блоков.
+    analysis_delta_strategy: Literal["lexical", "registry", "all_blocks"] = "lexical"
+    # Широкий отбор (больше max_blocks_share или место правки неизвестно): full идёт
+    # полным анализом, all_blocks проверяет все блоки с сокращёнными источниками.
+    analysis_delta_wide_selection: Literal["full", "all_blocks"] = "full"
+    # Соседи выбранного блока в сокращённом контексте документа; -1 отправляет весь
+    # документ контекстом.
+    analysis_delta_context_blocks: int = Field(default=-1, ge=-1, le=20)
+    # Разбиение источников для отбора и сокращения: paragraph по пустым строкам, как
+    # хранимые отпечатки; line по строкам и пунктам, читает тексты прошлых снимков.
+    analysis_delta_source_granularity: Literal["paragraph", "line"] = "paragraph"
     # Больше страниц PDF не разбирается: разбор держит общий замок PDFium, и один огромный
     # файл задержал бы все остальные.
     pdf_max_pages: int = Field(default=500, gt=0)

@@ -503,10 +503,12 @@ async def test_payloads_are_stored_only_when_enabled(
         key for key in set(worker.uploads) - keys_before if key.startswith("analysis_runs/")
     )
     assert stored == [
+        f"analysis_runs/{job_id}/0.proposals.json",
         f"analysis_runs/{job_id}/0.request.json",
         f"analysis_runs/{job_id}/0.response.json",
     ]
-    assert b'"contract_version":"2.0"' in worker.uploads[stored[0]]
+    assert b'"contract_version":"2.0"' in worker.uploads[stored[1]]
+    assert b'"reason":"placed"' in worker.uploads[stored[0]]
 
 
 async def test_payloads_are_not_stored_by_default(
@@ -592,6 +594,8 @@ async def test_suggestions_are_bound_to_blocks_and_keep_pipeline_order(
             "evidence_not_found": 0,
             "evidence_unparsed": 0,
         },
+        # Конвейер не перечислил вызовы модели в meta.llm_calls: расход неизвестен.
+        "llm_usage": None,
         "incremental": {
             "mode": "full",
             "reason": "no_baseline",

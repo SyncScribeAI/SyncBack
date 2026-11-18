@@ -24,6 +24,7 @@ class AnalysisFlag(Base):
     __table_args__ = (
         # Строка с CHECK, а не enum PostgreSQL: новое значение не потребует ALTER TYPE.
         CheckConstraint("status IN ('pending', 'reviewed')", name="ck_analysis_flags_status"),
+        CheckConstraint("origin IN ('analysis', 'refused_edit')", name="ck_analysis_flags_origin"),
         # Редактор читает все флаги текущего анализа в порядке ответа конвейера.
         Index("ix_analysis_flags_job_position", "analysis_job_id", "position"),
         # Без индекса каскадное удаление документа сканировало бы всю таблицу.
@@ -64,6 +65,12 @@ class AnalysisFlag(Base):
     # Прямоугольники блока на страницах PDF; у других форматов None.
     geometry: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
+    # analysis: флаг из ответа анализа; refused_edit: правка, которую бэкенд не привязал.
+    origin: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="analysis", server_default="analysis"
+    )
+    # Отказанная правка: {"kind", "old_text", "new_text", "refusal"}; у флагов анализа NULL.
+    proposal: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="pending", server_default="pending"
     )

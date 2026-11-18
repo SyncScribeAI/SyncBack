@@ -14,11 +14,23 @@ section_ref — название ближайшего предшествующе
 порядковый номер среди сохранённых правок, в порядке ответа конвейера.
 
 start_offset/end_offset — границы original_text в plain_text документа, в символах Python
-(как у блоков редактора). Если в блоке несколько правок modify/delete с одним old_text,
-вхождения раздаются по порядку ответа: курсор по (блок, old_text) сдвигается за найденное
-вхождение. Правка сверх числа вхождений отбрасывается — иначе две правки легли бы на
-одно место. Добавления с общим якорем курсор не сдвигают: несколько абзацев после одного
-якоря — законный ответ.
+(как у блоков редактора). Место modify/delete ищет строгий локатор (edit_locator) только
+внутри своего блока: если old_text встречается в блоке несколько раз, нужное вхождение
+выбирают контекст до и после фрагмента и номер вхождения из ответа. Без них неоднозначная
+правка отбрасывается, а не ставится на первое или очередное вхождение. Исключение одно:
+одинаковых правок без адреса ровно столько, сколько вхождений, и тогда они покрывают все
+вхождения, и порядок раздачи на результат не влияет. Две правки на одно место не
+привязываются: вторая отбрасывается. Добавления с общим якорем допустимы: несколько
+абзацев после одного якоря — законный ответ.
+
+Правка, которую не удалось привязать к месту в существующем редактируемом блоке, не
+пропадает: она становится флагом «проверьте вручную» с происхождением refused_edit, текстом
+предложенной замены и причиной отказа. Такие флаги идут после флагов анализа и под тот же
+лимит, чтобы не вытеснять их.
+
+По каждому исходному предложению маппер оставляет запись в outcomes: привязано или нет, с
+причиной и границами. По ним считаются доли корректных и отказанных привязок, поэтому
+в outcomes попадают все предложения, а не только сохранённые.
 
 Атрибуции правки к источнику в контракте нет, поэтому источники правки задача анализа
 заполняет всеми источниками, ушедшими в запрос.
@@ -41,7 +53,14 @@ from app.domain.interfaces.document_analyzer import (
     ProposedChange,
 )
 from app.domain.interfaces.document_parser import DocumentBlockType
-from app.domain.value_objects import SuggestionOriginVO
+from app.domain.services.edit_locator import (
+    Located,
+    LocateRefusal,
+    TextAnchor,
+    locate,
+    occurrences,
+)
+from app.domain.value_objects import FlagOriginVO, SuggestionOriginVO
 
 NO_SECTION = "Без раздела"
 # Длина колонки suggestions.section_ref.
@@ -49,6 +68,21 @@ _SECTION_REF_MAX = 500
 # Длина колонки analysis_flags.reason; причина — код вроде source_conflict, не текст.
 _FLAG_REASON_MAX = 64
 _KNOWN_KINDS = frozenset(kind.value for kind in ChangeKind)
+# Отказы привязки, после которых правку стоит показать человеку: блок есть и редактируется,
+# но место в нём не определено однозначно. Неполный ответ модели флагом не становится.
+_REFUSALS_TO_FLAG = frozenset(
+    {
+        LocateRefusal.AMBIGUOUS.value,
+        LocateRefusal.CONTEXT_MISMATCH.value,
+        LocateRefusal.INVALID_OCCURRENCE.value,
+        LocateRefusal.TAKEN.value,
+        LocateRefusal.NOT_IN_BLOCK.value,
+        "anchor_not_in_block",
+    }
+)
+_REFUSED_FLAG_PREFIX = "edit_"
+# Блок, тип, old_text и new_text: правки с одинаковым ключом взаимозаменяемы.
+_TwinKey = tuple[str, str, str, str | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +107,16 @@ class SuggestionDraft:
 
 
 @dataclass(frozen=True, slots=True)
+class RefusedEdit:
+    """Правка, которую не удалось привязать: что предлагалось и почему не поставлено."""
+
+    kind: str
+    old_text: str
+    new_text: str | None
+    refusal: str
+
+
+@dataclass(frozen=True, slots=True)
 class FlagDraft:
     block_ref: str
     section_ref: str
@@ -83,6 +127,21 @@ class FlagDraft:
     position: int
     evidence: tuple[Evidence, ...] = ()
     geometry: tuple[PageRect, ...] = ()
+    origin: FlagOriginVO = FlagOriginVO.ANALYSIS
+    proposal: RefusedEdit | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProposalOutcome:
+    """Исход привязки одного предложения конвейера; тексты не хранятся, только адрес."""
+
+    index: int
+    block_ref: str
+    kind: str
+    placed: bool
+    reason: str
+    start_offset: int | None = None
+    end_offset: int | None = None
 
 
 @dataclass(slots=True)
@@ -91,6 +150,14 @@ class MappedResult:
     flags: list[FlagDraft] = field(default_factory=list)
     # Причина → число отброшенных; для агрегированного предупреждения в логе.
     dropped: dict[str, int] = field(default_factory=dict)
+    outcomes: list[ProposalOutcome] = field(default_factory=list)
+
+    def outcome_counts(self) -> dict[str, int]:
+        return {
+            "proposals": len(self.outcomes),
+            "placed": sum(outcome.placed for outcome in self.outcomes),
+            "refused": sum(not outcome.placed for outcome in self.outcomes),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,13 +175,31 @@ def map_result(
     """
     index = index_blocks(blocks)
     mapped = MappedResult()
-    cursors: dict[tuple[str, str], int] = {}
-    for change in result.suggestions:
-        draft_or_reason = _to_suggestion(change, index, cursors, len(mapped.suggestions))
+    taken: dict[tuple[str, str], set[int]] = {}
+    twins = _identical_without_address(result.suggestions)
+    refused: list[tuple[ProposedChange, str]] = []
+    for number, change in enumerate(result.suggestions):
+        draft_or_reason = _to_suggestion(change, index, taken, twins, len(mapped.suggestions))
         if isinstance(draft_or_reason, str):
             mapped.dropped[draft_or_reason] = mapped.dropped.get(draft_or_reason, 0) + 1
+            if draft_or_reason in _REFUSALS_TO_FLAG:
+                refused.append((change, draft_or_reason))
+            mapped.outcomes.append(
+                ProposalOutcome(number, change.block_ref, change.kind, False, draft_or_reason)
+            )
         else:
             mapped.suggestions.append(draft_or_reason)
+            mapped.outcomes.append(
+                ProposalOutcome(
+                    number,
+                    change.block_ref,
+                    draft_or_reason.change_type.value,
+                    True,
+                    "placed",
+                    draft_or_reason.start_offset,
+                    draft_or_reason.end_offset,
+                )
+            )
     for flag in result.flags:
         if max_flags is not None and len(mapped.flags) >= max_flags:
             mapped.dropped["flags_over_limit"] = mapped.dropped.get("flags_over_limit", 0) + 1
@@ -139,7 +224,38 @@ def map_result(
                 position=len(mapped.flags),
             )
         )
+    for change, refusal in refused:
+        if max_flags is not None and len(mapped.flags) >= max_flags:
+            mapped.dropped["refused_flags_over_limit"] = (
+                mapped.dropped.get("refused_flags_over_limit", 0) + 1
+            )
+            continue
+        mapped.flags.append(
+            _refused_flag(change, refusal, index[change.block_ref], len(mapped.flags))
+        )
     return mapped
+
+
+def _refused_flag(
+    change: ProposedChange, refusal: str, context: BlockContext, position: int
+) -> FlagDraft:
+    is_add = change.kind == ChangeKind.ADD.value
+    return FlagDraft(
+        block_ref=change.block_ref,
+        section_ref=context.section_ref,
+        reason=(_REFUSED_FLAG_PREFIX + refusal)[:_FLAG_REASON_MAX],
+        original_text=context.block.text,
+        rationale=change.rationale,
+        quotes=change.quotes,
+        position=position,
+        origin=FlagOriginVO.REFUSED_EDIT,
+        proposal=RefusedEdit(
+            kind=change.kind,
+            old_text=(change.anchor_text if is_add else change.old_text) or "",
+            new_text=change.new_text,
+            refusal=refusal,
+        ),
+    )
 
 
 def index_blocks(blocks: Iterable[BlockPayload]) -> dict[str, BlockContext]:
@@ -156,7 +272,8 @@ def index_blocks(blocks: Iterable[BlockPayload]) -> dict[str, BlockContext]:
 def _to_suggestion(
     change: ProposedChange,
     index: dict[str, BlockContext],
-    cursors: dict[tuple[str, str], int],
+    taken: dict[tuple[str, str], set[int]],
+    twins: dict[_TwinKey, int],
     position: int,
 ) -> SuggestionDraft | str:
     """Черновик правки или причина отброса."""
@@ -179,19 +296,20 @@ def _to_suggestion(
             return "add_without_anchor"
         if not (new_text or "").strip():
             return "add_without_text"
-        found_at = context.block.text.find(original)
+        found_at = _anchor_position(context.block.text, change, original)
         if found_at < 0:
             return "anchor_not_in_block"
     else:
         original = change.old_text or ""
-        if not original.strip():
-            return "old_text_missing"
         key = (change.block_ref, original)
-        cursor = cursors.get(key, 0)
-        found_at = context.block.text.find(original, cursor)
-        if found_at < 0:
-            return "old_text_occurrences_exhausted" if cursor else "old_text_not_in_block"
-        cursors[key] = found_at + len(original)
+        used = taken.get(key, set())
+        located = locate(context.block.text, _anchor(change, original), used)
+        if located is LocateRefusal.AMBIGUOUS:
+            located = _spread_twins(context.block.text, change, original, used, twins)
+        if not isinstance(located, Located):
+            return located.value
+        found_at = located.start
+        taken.setdefault(key, set()).add(found_at)
     start = context.block.start_offset + found_at
     return SuggestionDraft(
         block_ref=change.block_ref,
@@ -206,6 +324,61 @@ def _to_suggestion(
         end_offset=start + len(original),
         quotes=change.quotes,
     )
+
+
+def _has_address(change: ProposedChange) -> bool:
+    return bool(change.context_before or change.context_after) or change.occurrence is not None
+
+
+def _twin_key(change: ProposedChange) -> _TwinKey:
+    return (change.block_ref, change.kind, change.old_text or "", change.new_text)
+
+
+def _identical_without_address(changes: tuple[ProposedChange, ...]) -> dict[_TwinKey, int]:
+    counts: dict[_TwinKey, int] = {}
+    for change in changes:
+        if not _has_address(change):
+            key = _twin_key(change)
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _spread_twins(
+    text: str,
+    change: ProposedChange,
+    original: str,
+    used: set[int],
+    twins: dict[_TwinKey, int],
+) -> Located | LocateRefusal:
+    """Очередное свободное вхождение, если одинаковые правки покрывают все вхождения."""
+    if _has_address(change):
+        return LocateRefusal.AMBIGUOUS
+    starts = occurrences(text, original)
+    if twins.get(_twin_key(change), 0) != len(starts):
+        return LocateRefusal.AMBIGUOUS
+    free = next((start for start in starts if start not in used), None)
+    return LocateRefusal.TAKEN if free is None else Located(free)
+
+
+def _anchor(change: ProposedChange, exact: str) -> TextAnchor:
+    return TextAnchor(
+        exact=exact,
+        prefix=change.context_before or None,
+        suffix=change.context_after or None,
+        occurrence=change.occurrence,
+    )
+
+
+def _anchor_position(text: str, change: ProposedChange, anchor_text: str) -> int:
+    """Якорь добавления: с адресом из ответа строго, без адреса первое вхождение.
+
+    В DOCX новый абзац встаёт после абзаца якоря, и выбор вхождения внутри блока на
+    место вставки не влияет; адрес нужен текстовым форматам, где вставка идёт по смещению.
+    """
+    if change.context_before or change.context_after or change.occurrence is not None:
+        located = locate(text, _anchor(change, anchor_text))
+        return located.start if isinstance(located, Located) else -1
+    return text.find(anchor_text)
 
 
 def _confidence(value: float | None) -> float | None:

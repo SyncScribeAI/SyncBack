@@ -90,7 +90,12 @@ from app.domain.interfaces.source_connector import SourceRef
 from app.domain.lifecycle import AnalysisExecutionLifecycle, AnalysisJobLifecycle, JobOutcome
 from app.domain.pipeline_run import PipelineRunSummary, summarize_run
 from app.domain.services.analysis_request_builder import DocumentInput, build_analysis_request
-from app.domain.services.analysis_result_mapper import FlagDraft, SuggestionDraft, map_result
+from app.domain.services.analysis_result_mapper import (
+    FlagDraft,
+    ProposalOutcome,
+    SuggestionDraft,
+    map_result,
+)
 from app.domain.services.delta_merge import MergePlan, audit_diff, plan_merge
 from app.domain.services.delta_request import DeltaRequest, add_on_unchanged, build_delta_request
 from app.domain.services.delta_selection import DeltaLimits
@@ -126,6 +131,7 @@ from app.workers.pipeline.incremental import (
     delta_against,
     full_run_stats,
     load_baseline_fingerprints,
+    load_baseline_texts,
     reused_run_stats,
 )
 from app.workers.pipeline.suggestion_drafts import to_suggestions
@@ -326,7 +332,12 @@ async def _run_attempt(job: _StartedJob, attempt: int) -> RetryLater | None:
             )
         else:
             request = _build_request(
-                job, attempt, document, delta_request.sources, delta_request.selected.refs
+                job,
+                attempt,
+                document,
+                delta_request.sources,
+                delta_request.selected.refs,
+                delta_request.document_refs,
             )
             run_input = replace(
                 run_input,
@@ -405,7 +416,12 @@ async def _located_result(
     run: PipelineRunSummary,
 ) -> tuple[list[SuggestionDraft], list[FlagDraft], PipelineRunSummary]:
     """Черновики правок и флагов с основаниями и, у PDF, с геометрией на страницах."""
-    drafts, flags = _map(job.id, attempt, result, request)
+    drafts, flags, outcomes = _map(job.id, attempt, result, request)
+    if outcomes:
+        # Исход каждой правки (поставлена или чем отказана) нужен для разбора отказов адресации.
+        await _store_payload(
+            job.id, attempt, "proposals", lambda: pydantic_core.to_json(list(outcomes))
+        )
     drafts, flags, counters = attach_evidence(
         drafts,
         flags,
@@ -480,6 +496,17 @@ async def _plan_from_baseline(
     )
     if fingerprints is None:
         return DeltaFallback.FINGERPRINTS_UNAVAILABLE
+    baseline_texts = None
+    if (
+        _settings.analysis_delta_strategy == "registry"
+        or _settings.analysis_delta_source_granularity == "line"
+    ):
+        baseline_texts = await load_baseline_texts(
+            get_storage(), baseline_sources, fetched.snapshots, job.id
+        )
+        if baseline_texts is None:
+            return DeltaFallback.FINGERPRINTS_UNAVAILABLE
+    context_blocks = _settings.analysis_delta_context_blocks
     planned = build_delta_request(
         baseline=baseline,
         fingerprints=fingerprints,
@@ -490,6 +517,11 @@ async def _plan_from_baseline(
         flags=flags,
         policy=policy,
         limits=_delta_limits(),
+        baseline_texts=baseline_texts,
+        strategy=_settings.analysis_delta_strategy,
+        wide_selection=_settings.analysis_delta_wide_selection,
+        context_blocks=None if context_blocks < 0 else context_blocks,
+        source_granularity=_settings.analysis_delta_source_granularity,
     )
     if isinstance(planned, DeltaRequest):
         logger.info(
@@ -520,6 +552,7 @@ def _delta_limits() -> DeltaLimits:
         rare_block_count=_settings.analysis_delta_rare_blocks,
         context_segments=_settings.analysis_delta_context_segments,
         support_segments=_settings.analysis_delta_support_segments,
+        strong_support_tokens=_settings.analysis_delta_strong_support_tokens,
         stem_chars=_settings.analysis_delta_stem_chars,
     )
 
@@ -637,6 +670,7 @@ async def _decide(
             (payload.id, payload.type.value, payload.name, snapshot.content_hash)
             for payload, snapshot in zip(fetched.payloads, fetched.snapshots, strict=True)
         ],
+        pipeline_version=_settings.analysis_pipeline_version,
     )
     mode = IncrementalMode(_settings.analysis_incremental_mode)
     baseline = None
@@ -978,6 +1012,7 @@ def _build_request(
     document: DocumentInput,
     sources: Sequence[SourcePayload],
     editable: Collection[str] | None = None,
+    include: Collection[str] | None = None,
 ) -> AnalysisRequest:
     try:
         return build_analysis_request(
@@ -987,6 +1022,7 @@ def _build_request(
             sources=sources,
             limits=analysis_limits(_settings),
             editable=editable,
+            include=include,
         )
     except LLMInputTooLargeError as exc:
         raise _JobFailed("LLM_INPUT_TOO_LARGE", str(exc)) from exc
@@ -1026,8 +1062,12 @@ def _log_call(
 
 def _map(
     job_id: uuid.UUID, attempt: int, result: AnalysisResult, request: AnalysisRequest
-) -> tuple[list[SuggestionDraft], list[FlagDraft]]:
+) -> tuple[list[SuggestionDraft], list[FlagDraft], list[ProposalOutcome]]:
     mapped = map_result(result, request.document.blocks, max_flags=_settings.analysis_max_flags)
+    logger.info(
+        "Анализ v2: правки модели сопоставлены с блоками",
+        extra={"job_id": str(job_id), "attempt": attempt, **mapped.outcome_counts()},
+    )
     if mapped.dropped:
         logger.warning(
             "Анализ v2: часть правок отброшена",
@@ -1046,7 +1086,7 @@ def _map(
             "Анализ v2: добавлены догоняющие правки",
             extra={"job_id": str(job_id), "propagated": propagated},
         )
-    return drafts, mapped.flags
+    return drafts, mapped.flags, mapped.outcomes
 
 
 def _propagation() -> PropagationLimits | None:
@@ -1071,6 +1111,15 @@ def _summarize(
         logger.warning(
             "Анализ v2: meta конвейера слишком большая и не сохранена",
             extra={"job_id": str(job_id), "request_id": run.request_id},
+        )
+    if run.usage is not None:
+        logger.info(
+            "Анализ v2: учёт вызовов LLM",
+            extra={
+                "job_id": str(job_id),
+                "request_id": run.request_id,
+                **{k: v for k, v in run.usage.items() if k != "by_stage"},
+            },
         )
     return run
 

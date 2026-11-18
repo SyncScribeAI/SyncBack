@@ -17,7 +17,7 @@ from app.domain.exceptions import (
 )
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.services.analysis_flag_service import AnalysisFlagService
-from app.domain.value_objects import DocumentStatusVO, FlagStatusVO
+from app.domain.value_objects import DocumentStatusVO, FlagOriginVO, FlagStatusVO
 from tests.unit._fakes import FakeUnitOfWork
 
 pytestmark = pytest.mark.asyncio
@@ -33,6 +33,8 @@ def _setup(
     flag_job: uuid.UUID = JOB,
     flag_document: uuid.UUID | None = None,
     changed: bool = True,
+    origin: FlagOriginVO = FlagOriginVO.ANALYSIS,
+    visible: frozenset[FlagOriginVO] | None = None,
 ) -> tuple[AnalysisFlagService, FakeUnitOfWork, Any]:
     document = SimpleNamespace(
         id=uuid.uuid4(), project_id=PROJECT, status=status, current_analysis_job_id=JOB
@@ -42,6 +44,7 @@ def _setup(
         analysis_job_id=flag_job,
         document_id=flag_document or document.id,
         status="pending",
+        origin=origin.value,
     )
     flags = SimpleNamespace(
         get_by_id=AsyncMock(return_value=flag),
@@ -51,7 +54,12 @@ def _setup(
     uow = FakeUnitOfWork(
         documents=SimpleNamespace(get_by_id=AsyncMock(return_value=document)), flags=flags
     )
-    return AnalysisFlagService(cast(IUnitOfWork, uow)), uow, (document, flag)
+    service = (
+        AnalysisFlagService(cast(IUnitOfWork, uow))
+        if visible is None
+        else AnalysisFlagService(cast(IUnitOfWork, uow), visible)
+    )
+    return service, uow, (document, flag)
 
 
 async def _mark(service: AnalysisFlagService, objects: Any) -> Any:
@@ -105,3 +113,21 @@ async def test_document_without_analysis_has_no_flags() -> None:
     objects[0].current_analysis_job_id = None
     assert await service.list_for_document(PROJECT, objects[0].id) == []
     uow.flags.list_by_analysis_job.assert_not_awaited()
+
+
+async def test_refused_edit_flag_is_hidden_by_default() -> None:
+    service, uow, objects = _setup(origin=FlagOriginVO.REFUSED_EDIT)
+    with pytest.raises(AnalysisFlagNotFoundError):
+        await _mark(service, objects)
+    uow.flags.set_status.assert_not_awaited()
+    await service.list_for_document(PROJECT, objects[0].id)
+    uow.flags.list_by_analysis_job.assert_awaited_once_with(JOB, frozenset({FlagOriginVO.ANALYSIS}))
+
+
+async def test_refused_edit_flag_is_marked_when_visible() -> None:
+    service, uow, objects = _setup(
+        origin=FlagOriginVO.REFUSED_EDIT,
+        visible=frozenset({FlagOriginVO.ANALYSIS, FlagOriginVO.REFUSED_EDIT}),
+    )
+    assert (await _mark(service, objects)).changed is True
+    uow.flags.set_status.assert_awaited_once()

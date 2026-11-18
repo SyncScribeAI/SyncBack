@@ -48,6 +48,7 @@ from app.domain.services.project_service import ProjectService
 from app.domain.services.source_service import SourceService
 from app.domain.services.source_snapshot_service import SourceSnapshotService
 from app.domain.services.suggestion_service import SuggestionService
+from app.domain.value_objects import FlagOriginVO
 from app.infrastructure.cache.redis_client import get_redis_client
 from app.infrastructure.db.repositories.dashboard_repository import DashboardRepository
 from app.infrastructure.db.repositories.project_repository import ProjectRepository
@@ -84,7 +85,11 @@ def _get_file_storage() -> S3FileStorage:
 
 @lru_cache
 def _get_parser_registry() -> DocumentParserRegistry:
-    return DocumentParserRegistry(pdf_max_pages=get_settings().pdf_max_pages)
+    settings = get_settings()
+    return DocumentParserRegistry(
+        pdf_max_pages=settings.pdf_max_pages,
+        docx_table_cells_editable=settings.docx_table_cells_editable,
+    )
 
 
 @lru_cache
@@ -155,7 +160,10 @@ def get_analysis_job_service(
 def get_analysis_flag_service(
     uow: SqlAlchemyUnitOfWork = Depends(get_uow),
 ) -> AnalysisFlagService:
-    return AnalysisFlagService(uow)
+    visible = {FlagOriginVO.ANALYSIS}
+    if get_settings().analysis_refused_edit_flags_visible:
+        visible.add(FlagOriginVO.REFUSED_EDIT)
+    return AnalysisFlagService(uow, visible)
 
 
 def get_audit_log_service(

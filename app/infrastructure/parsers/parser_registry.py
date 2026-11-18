@@ -45,8 +45,10 @@ class DocumentParserRegistry:
     }
     # Отсутствующие суффиксы → fallback на TxtParser.
 
-    def __init__(self, pdf_max_pages: int = DEFAULT_PDF_MAX_PAGES) -> None:
-        self._docx_parser = DocxParser()
+    def __init__(
+        self, pdf_max_pages: int = DEFAULT_PDF_MAX_PAGES, *, docx_table_cells_editable: bool = False
+    ) -> None:
+        self._docx_parser = DocxParser(table_cells_editable=docx_table_cells_editable)
         self._txt_parser = TxtParser()
         self._markdown_parser = MarkdownParser()
         self._html_parser = HtmlParser()

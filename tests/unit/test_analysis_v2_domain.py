@@ -159,37 +159,75 @@ def test_offsets_point_into_document_text_like_editor_blocks() -> None:
     result = _completed(
         ProposedChange("modify", "p-2", "10 дней", "5 дней"),
         ProposedChange("add", "p-2", None, "Оплата по счёту.", anchor_text="Оплата картой."),
-        ProposedChange("delete", last, "10 дней", None),
+        ProposedChange("delete", last, "10 дней", None, context_after=", ещё раз"),
     )
     mapped = map_result(result, request.document.blocks)
     for draft in mapped.suggestions:
         assert text[draft.start_offset : draft.end_offset] == draft.original_text
-    # Одна правка на повторяющуюся фразу — первое вхождение.
     last_block = request.document.blocks[-1]
     assert mapped.suggestions[2].start_offset == last_block.start_offset + len("Срок ")
 
 
-def test_repeated_phrase_in_block_gets_occurrences_in_answer_order() -> None:
+def test_repeated_phrase_in_block_is_placed_only_by_address() -> None:
     text = MD + "\nСрок 10 дней, ещё раз 10 дней.\n"
     request = build_analysis_request(
         job_id=JOB_ID, attempt=0, document=_document(text), sources=[_source()]
     )
     block = request.document.blocks[-1]
     result = _completed(
+        # Без адреса не ясно, какое из двух вхождений менять на 5, а какое на 7.
         ProposedChange("modify", block.ref, "10 дней", "5 дней"),
-        ProposedChange("modify", block.ref, "10 дней", "7 дней"),
-        # Третьего вхождения нет: правка легла бы на уже занятое место.
-        ProposedChange("delete", block.ref, "10 дней", None),
+        ProposedChange("modify", block.ref, "10 дней", "7 дней", occurrence=2),
+        ProposedChange("modify", block.ref, "10 дней", "8 дней", context_before="Срок "),
+        # Номер вхождения и контекст указывают на разные места.
+        ProposedChange("delete", block.ref, "10 дней", None, context_before="Срок ", occurrence=2),
+        # Второе вхождение уже занято правкой выше.
+        ProposedChange("delete", block.ref, "10 дней", None, occurrence=2),
+        ProposedChange("modify", block.ref, "10 дней", "9 дней", occurrence=3),
         ProposedChange("add", block.ref, None, "Первое.", anchor_text="Срок"),
         ProposedChange("add", block.ref, None, "Второе.", anchor_text="Срок"),
     )
     mapped = map_result(result, request.document.blocks)
     starts = [d.start_offset - block.start_offset for d in mapped.suggestions]
-    assert starts == [len("Срок "), len("Срок 10 дней, ещё раз "), 0, 0]
-    assert [d.suggested_text for d in mapped.suggestions[:2]] == ["5 дней", "7 дней"]
-    assert mapped.dropped == {"old_text_occurrences_exhausted": 1}
+    assert starts == [len("Срок 10 дней, ещё раз "), len("Срок "), 0, 0]
+    assert [d.suggested_text for d in mapped.suggestions[:2]] == ["7 дней", "8 дней"]
+    assert mapped.dropped == {
+        "ambiguous_old_text": 1,
+        "context_mismatch": 1,
+        "occurrence_taken": 1,
+        "invalid_occurrence": 1,
+    }
+    assert [o.reason for o in mapped.outcomes] == [
+        "ambiguous_old_text",
+        "placed",
+        "placed",
+        "context_mismatch",
+        "occurrence_taken",
+        "invalid_occurrence",
+        "placed",
+        "placed",
+    ]
+    assert mapped.outcome_counts() == {"proposals": 8, "placed": 4, "refused": 4}
     for draft in mapped.suggestions:
         assert text[draft.start_offset : draft.end_offset] == draft.original_text
+
+
+def test_identical_changes_cover_every_occurrence_without_address() -> None:
+    text = MD + "\nСрок 10 дней, ещё раз 10 дней.\n"
+    request = build_analysis_request(
+        job_id=JOB_ID, attempt=0, document=_document(text), sources=[_source()]
+    )
+    block = request.document.blocks[-1]
+    same = ProposedChange("modify", block.ref, "10 дней", "5 дней")
+    mapped = map_result(_completed(same, same), request.document.blocks)
+    assert [d.start_offset - block.start_offset for d in mapped.suggestions] == [
+        len("Срок "),
+        len("Срок 10 дней, ещё раз "),
+    ]
+    # Одна такая правка на два вхождения неоднозначна.
+    assert map_result(_completed(same), request.document.blocks).dropped == {
+        "ambiguous_old_text": 1
+    }
 
 
 def test_section_ref_matches_editor_sections() -> None:
@@ -336,7 +374,7 @@ def _big_case(blocks: int, changes: int) -> tuple[DocumentInput, AnalysisResult]
     step = max(len(refs) // max(changes, 1), 1)
     result = _completed(
         *(
-            ProposedChange("modify", refs[i * step], "10 рабочих", "5 рабочих")
+            ProposedChange("modify", refs[i * step], "10 рабочих", "5 рабочих", occurrence=1)
             for i in range(changes)
         )
     )

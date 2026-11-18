@@ -4,11 +4,16 @@
 документу перейти в ready. Отметка — только память для пользователя, что место он уже
 сверил с цитатами. Поэтому её можно ставить и снимать и в awaiting_approval, и в ready —
 везде, где у документа есть результаты анализа.
+
+Флаги отказанных правок хранятся вместе с остальными, но API видит только происхождения
+из visible_origins: пока интерфейс их не показывает, они не попадают ни в список, ни в
+отметку «просмотрено».
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass
 
 from app.domain.exceptions import (
@@ -20,7 +25,9 @@ from app.domain.exceptions import (
 from app.domain.interfaces.entities import AnalysisFlagProtocol, DocumentProtocol
 from app.domain.interfaces.unit_of_work import IUnitOfWork
 from app.domain.lifecycle import DocumentLifecycle
-from app.domain.value_objects import FlagStatusVO
+from app.domain.value_objects import FlagOriginVO, FlagStatusVO
+
+DEFAULT_VISIBLE_ORIGINS = frozenset({FlagOriginVO.ANALYSIS})
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,8 +38,13 @@ class FlagStatusChange:
 
 
 class AnalysisFlagService:
-    def __init__(self, uow: IUnitOfWork) -> None:
+    def __init__(
+        self,
+        uow: IUnitOfWork,
+        visible_origins: Collection[FlagOriginVO] = DEFAULT_VISIBLE_ORIGINS,
+    ) -> None:
         self._uow = uow
+        self._visible = frozenset(visible_origins)
 
     async def list_for_document(
         self, project_id: uuid.UUID, document_id: uuid.UUID
@@ -43,7 +55,9 @@ class AnalysisFlagService:
             if document.current_analysis_job_id is None:
                 return []
             return list(
-                await self._uow.flags.list_by_analysis_job(document.current_analysis_job_id)
+                await self._uow.flags.list_by_analysis_job(
+                    document.current_analysis_job_id, self._visible
+                )
             )
 
     async def set_status(
@@ -57,7 +71,11 @@ class AnalysisFlagService:
         async with self._uow:
             document = await self._get_document(project_id, document_id)
             flag = await self._uow.flags.get_by_id(flag_id)
-            if flag is None or flag.document_id != document.id:
+            if (
+                flag is None
+                or flag.document_id != document.id
+                or FlagOriginVO(flag.origin) not in self._visible
+            ):
                 raise AnalysisFlagNotFoundError(f"Флаг {flag_id} не найден")
             if flag.analysis_job_id != document.current_analysis_job_id:
                 raise StaleAnalysisFlagJobError(

@@ -5,7 +5,10 @@
 Абзацы перебираются в том же порядке, что и в DocxParser (тело и ячейки таблиц), и по
 этому обходу восстанавливаются их начала в plain_text (абзацы склеены через «\\n»).
 Правка с границами попадает в свой абзац бинарным поиском, если текст под границами
-совпадает с old_text; остальные правки ищут первое вхождение в исходном тексте абзацев.
+совпадает с old_text. Правка с block_ref при несовпадении не применяется: первое вхождение
+old_text в другом абзаце дало бы правку чужого места, а самопроверка после сохранения
+такую ошибку не видит, потому что сверяет файл с тем же планом. Первое вхождение ищут
+только правки без block_ref из прежнего конвейера.
 Оба пути сводятся к правке абзаца в его нормализованных координатах и дальше идут через
 одну функцию замены. Итого O(P + R + S log S): P абзацев, R ранов затронутых абзацев,
 S правок.
@@ -108,6 +111,13 @@ class _Plan:
     edits: dict[int, list[TextEdit]] = field(default_factory=dict)
     additions: dict[int, list[str]] = field(default_factory=dict)
     unapplied: int = 0
+    reasons: list[str] = field(default_factory=list)
+
+
+def _unapplied_reason(change: AppliedChange) -> str:
+    if change.block_ref is not None:
+        return "адрес правки не совпал с текстом блока"
+    return "фрагмент правки не найден"
 
 
 def _plan(index: _ParagraphIndex, changes: list[AppliedChange]) -> _Plan:
@@ -115,9 +125,12 @@ def _plan(index: _ParagraphIndex, changes: list[AppliedChange]) -> _Plan:
     for change in changes:
         if change.change_type == "add":
             anchor = normalize_text(change.old_text or "").strip()
-            located = index.locate(change) or (index.search(anchor) if anchor else None)
+            located = index.locate(change) or (
+                index.search(anchor) if anchor and change.block_ref is None else None
+            )
             if located is None or not change.new_text:
                 plan.unapplied += 1
+                plan.reasons.append(_unapplied_reason(change))
                 continue
             plan.additions.setdefault(located[0], []).append(change.new_text)
             continue
@@ -125,9 +138,12 @@ def _plan(index: _ParagraphIndex, changes: list[AppliedChange]) -> _Plan:
         if change.change_type not in ("modify", "delete") or not old_text:
             plan.unapplied += 1
             continue
-        located = index.locate(change) or index.search(old_text)
+        located = index.locate(change) or (
+            index.search(old_text) if change.block_ref is None else None
+        )
         if located is None:
             plan.unapplied += 1
+            plan.reasons.append(_unapplied_reason(change))
             continue
         number, start, end = located
         replacement = change.new_text or "" if change.change_type == "modify" else ""
@@ -198,6 +214,7 @@ class DocxExporter:
         index = _ParagraphIndex(document)
         plan = _plan(index, changes)
         report.unapplied += plan.unapplied
+        report.reasons.extend(plan.reasons)
         expected = list(index.texts)
         for number, edits in plan.edits.items():
             expected[number] = _apply_paragraph(
